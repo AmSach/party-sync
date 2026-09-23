@@ -49,7 +49,18 @@ if (typeof window !== 'undefined' && window.RTCPeerConnection) {
   const origSetLocalDescription = window.RTCPeerConnection.prototype.setLocalDescription;
   window.RTCPeerConnection.prototype.setLocalDescription = function (desc) {
     if (desc && desc.sdp) {
-      desc.sdp = configureHighFidelityAudioSDP(desc.sdp);
+      try {
+        const modifiedSdp = configureHighFidelityAudioSDP(desc.sdp);
+        // Modern RTCSessionDescription has read-only sdp getter in strict mode.
+        // Construct a new RTCSessionDescription / object to pass to native setLocalDescription.
+        const newDesc = typeof window.RTCSessionDescription === 'function'
+          ? new window.RTCSessionDescription({ type: desc.type, sdp: modifiedSdp })
+          : { type: desc.type, sdp: modifiedSdp };
+
+        return origSetLocalDescription.call(this, newDesc);
+      } catch (e) {
+        console.warn('[WebRTC] SDP modification failed, using original description:', e);
+      }
     }
     return origSetLocalDescription.apply(this, arguments);
   };

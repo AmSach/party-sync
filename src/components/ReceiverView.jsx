@@ -42,11 +42,18 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
   };
 
+  const isConnectedRef = useRef(false);
+  useEffect(() => {
+    isConnectedRef.current = isConnected;
+  }, [isConnected]);
+
   useEffect(() => {
     if (initialRoomId) {
       setRoomId(initialRoomId);
     }
+  }, [initialRoomId]);
 
+  useEffect(() => {
     clockSync.onSyncChange = (info) => {
       setClockInfo(info);
     };
@@ -56,7 +63,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
           try { await audioProcessor.ctx.resume(); } catch (e) {}
         }
-        if (wakeLockRef.current === null && isConnected) {
+        if (wakeLockRef.current === null && isConnectedRef.current) {
           requestWakeLock();
         }
       }
@@ -68,7 +75,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       disconnect();
     };
-  }, [initialRoomId, isConnected]);
+  }, []);
 
   const triggerVisualFlash = () => {
     setIsFlashing(true);
@@ -88,6 +95,11 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
     setStatusText('Tuning into session...');
     audioProcessor.init();
+
+    if (peerRef.current) {
+      try { peerRef.current.destroy(); } catch (e) {}
+      peerRef.current = null;
+    }
 
     const receiverPeerId = 'CLIENT-' + Math.random().toString(36).substring(2, 9);
     const peer = new Peer(receiverPeerId, {
