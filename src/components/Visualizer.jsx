@@ -27,7 +27,7 @@ export default function Visualizer({ analyser, active = true, height = 70 }) {
         }
       }
 
-      // Analog VU segmented meter bars
+      // Segmented VU meter bars
       const barCount = 28;
       const barWidth = (width / barCount) * 0.72;
       const gap = (width / barCount) * 0.28;
@@ -45,13 +45,13 @@ export default function Visualizer({ analyser, active = true, height = 70 }) {
           const y = h - (s + 1) * (segmentHeight + segmentGap);
           const ratio = s / (h / (segmentHeight + segmentGap));
 
-          // Analog VU color gradient: Amber-gold rising into warm terracotta peak
+          // Teal/Cyan color gradient: deep cyan rising into bright teal, danger red at peak
           if (ratio > 0.8) {
-            ctx.fillStyle = '#e05a38'; // Terracotta Peak
+            ctx.fillStyle = '#ef4444'; // Red Peak (clipping warning)
           } else if (ratio > 0.5) {
-            ctx.fillStyle = '#f59e0b'; // Warm Amber
+            ctx.fillStyle = '#22d3ee'; // Bright Cyan
           } else {
-            ctx.fillStyle = '#b45309'; // Deep Bronze Amber
+            ctx.fillStyle = '#0891b2'; // Deep Teal
           }
 
           ctx.fillRect(x, y, barWidth, segmentHeight);
@@ -72,10 +72,10 @@ export default function Visualizer({ analyser, active = true, height = 70 }) {
       height: `${height}px`, 
       overflow: 'hidden', 
       borderRadius: '10px',
-      background: '#0a0908',
-      border: '1px solid #24211e',
+      background: '#080e14',
+      border: '1px solid #1a2838',
       padding: '4px',
-      boxShadow: '0 2px 8px rgba(0,0,0,0.6) inset'
+      boxShadow: '0 2px 8px rgba(0,0,0,0.4) inset'
     }}>
       <canvas
         ref={canvasRef}

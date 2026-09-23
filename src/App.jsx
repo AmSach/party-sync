@@ -39,7 +39,7 @@ export default function App() {
       display: 'flex', 
       flexDirection: 'column', 
       position: 'relative',
-      background: 'radial-gradient(ellipse at 50% 10%, #1c1813 0%, #0c0b0a 75%)'
+      background: 'radial-gradient(ellipse at 50% 10%, #1a2838 0%, #0f1419 75%)'
     }}>
       
       {/* Main Console Container */}
@@ -52,7 +52,7 @@ export default function App() {
           justifyContent: 'space-between',
           alignItems: 'center',
           borderBottom: '1px solid var(--border-deck)',
-          background: 'rgba(12, 11, 10, 0.88)',
+          background: 'rgba(15, 20, 25, 0.92)',
           backdropFilter: 'blur(12px)',
           position: 'sticky',
           top: 0,
@@ -172,13 +172,13 @@ export default function App() {
           padding: '14px 20px',
           textAlign: 'center',
           borderTop: '1px solid var(--border-deck)',
-          background: 'rgba(12, 11, 10, 0.92)',
+          background: 'rgba(15, 20, 25, 0.95)',
           color: 'var(--text-dim)',
           fontSize: '11px',
           fontFamily: 'monospace',
           letterSpacing: '0.5px'
         }}>
-          PARTYSYNC ANALOG MESH • 256KBPS STUDIO HI-FI OPUS • PRECISION MASTER CLOCK
+          PARTYSYNC MESH AUDIO • 256KBPS OPUS HI-FI • ACOUSTIC AUTO-SYNC
         </footer>
 
       </div>

@@ -7,6 +7,7 @@ import {
   Zap, Clock, Wifi, Info, BellRing, Target
 } from 'lucide-react';
 import { clockSync, ClockSynchronizer } from '../utils/clockSync';
+import { AcousticCalibrator } from '../utils/acousticCalibrate';
 import Visualizer from './Visualizer';
 
 export default function HostView({ onBack }) {
@@ -118,6 +119,8 @@ export default function HostView({ onBack }) {
         if (data.type === 'NTP_PING') {
           // Immediately respond with nanosecond server timestamp for Christian's clock sync
           ClockSynchronizer.handleHostPing(conn, data);
+        } else if (data.type === 'CALIBRATE_REQUEST') {
+          handleCalibrateRequest(conn);
         }
       });
 
@@ -158,6 +161,45 @@ export default function HostView({ onBack }) {
 
     // 2. Play scheduled acoustic pulse and trigger flash on Host simultaneously
     clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash);
+  };
+
+  // Handle automated acoustic calibration request from satellite phone
+  const handleCalibrateRequest = (conn) => {
+    if (!conn || !conn.open) return;
+    if (laptopMuted) {
+      conn.send({ 
+        type: 'CALIBRATE_ERROR', 
+        message: 'Host laptop speaker is muted. Unmute laptop speaker so phone can hear sync pulse.' 
+      });
+      return;
+    }
+
+    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
+    audioContextRef.current = ctx;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const targetMasterTime = clockSync.now() + 450;
+    conn.send({ type: 'CALIBRATE_SCHEDULED', targetMasterTime });
+
+    const delaySec = Math.max(0, (targetMasterTime - clockSync.now()) / 1000);
+    const triggerAudioTime = ctx.currentTime + delaySec;
+
+    // Temporarily duck music on host laptop if playing
+    if (hostGainNodeRef.current && !laptopMuted) {
+      hostGainNodeRef.current.gain.setValueAtTime(0.12, triggerAudioTime - 0.05);
+      hostGainNodeRef.current.gain.linearRampToValueAtTime(1.0, triggerAudioTime + 0.85);
+    }
+
+    // Play Host calibration beep (2400Hz) through host delay node so it matches music delay!
+    AcousticCalibrator.playHostBeep(ctx, hostDelayNodeRef.current || ctx.destination, triggerAudioTime);
+    triggerVisualFlash();
+  };
+
+  const triggerAutoSyncForPeer = (peerId) => {
+    const conn = activeConnectionsRef.current.get(peerId);
+    if (conn && conn.open) {
+      conn.send({ type: 'START_CALIBRATE_CLIENT' });
+    }
   };
 
   const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('firefox');
@@ -475,8 +517,8 @@ export default function HostView({ onBack }) {
               width: '8px',
               height: '8px',
               borderRadius: '50%',
-              background: connectedPeers.length > 0 ? '#10b981' : '#f59e0b',
-              boxShadow: connectedPeers.length > 0 ? '0 0 10px #10b981' : 'none'
+              background: connectedPeers.length > 0 ? '#10b981' : 'var(--accent-bright)',
+              boxShadow: connectedPeers.length > 0 ? '0 0 10px #10b981' : '0 0 8px var(--accent-glow)'
             }} />
             <span className="font-mono" style={{ fontSize: '12px', fontWeight: '700', color: connectedPeers.length > 0 ? '#10b981' : 'var(--text-cream)' }}>
               {connectedPeers.length === 0 
@@ -716,8 +758,16 @@ export default function HostView({ onBack }) {
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
                   <span>P2P DataChannel Active</span>
-                  <span style={{ color: 'var(--amber-bright)' }}>256KBPS OPUS</span>
+                  <span style={{ color: 'var(--accent-bright)' }}>256KBPS OPUS</span>
                 </div>
+
+                <button
+                  onClick={() => triggerAutoSyncForPeer(peer.id)}
+                  className="btn-analog btn-amber"
+                  style={{ fontSize: '11px', padding: '6px 12px', marginTop: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                >
+                  <Target size={12} /> Auto-Sync This Speaker
+                </button>
               </div>
             ))}
           </div>

@@ -1,20 +1,29 @@
 :root {
-  --bg-core: #0c0b0a;
-  --bg-deck: #151412;
-  --bg-deck-subtle: #1c1a17;
-  --bg-deck-inset: #0e0d0c;
-  --border-deck: #2a2723;
-  --border-deck-light: #3a3631;
-  --amber-core: #f59e0b;
-  --amber-bright: #fbbf24;
-  --amber-dim: #92400e;
-  --amber-glow: rgba(245, 158, 11, 0.22);
-  --terracotta: #e05a38;
-  --terracotta-dim: rgba(224, 90, 56, 0.15);
+  --bg-core: #0f1419;
+  --bg-deck: #161d26;
+  --bg-deck-subtle: #1c2630;
+  --bg-deck-inset: #0c1117;
+  --border-deck: #243040;
+  --border-deck-light: #344a60;
+  --accent-core: #06b6d4;
+  --accent-bright: #22d3ee;
+  --accent-dim: #0e7490;
+  --accent-glow: rgba(6, 182, 212, 0.22);
+  --accent-success: #10b981;
+  --accent-warn: #f59e0b;
+  --accent-danger: #ef4444;
+  --text-cream: #e8edf2;
+  --text-muted: #8b95a5;
+  --text-dim: #556070;
+
+  /* Legacy aliases for components that still reference old names */
+  --amber-core: var(--accent-core);
+  --amber-bright: var(--accent-bright);
+  --amber-dim: var(--accent-dim);
+  --amber-glow: var(--accent-glow);
+  --terracotta: #ef4444;
+  --terracotta-dim: rgba(239, 68, 68, 0.15);
   --sage-muted: #84a98c;
-  --text-cream: #f4efe6;
-  --text-muted: #a39e93;
-  --text-dim: #6e695f;
   
   --font-serif: 'Fraunces', Georgia, serif;
   --font-sans: 'Space Grotesk', -apple-system, sans-serif;
@@ -63,15 +72,15 @@ body {
   font-family: var(--font-mono);
 }
 
-/* Tactile Analog Deck Styles */
+/* Tactile Deck Styles */
 .analog-deck {
   background: var(--bg-deck);
   border: 1px solid var(--border-deck);
   border-radius: 20px;
   box-shadow: 
-    0 1px 0 0 rgba(255, 255, 255, 0.05) inset,
-    0 16px 40px -12px rgba(0, 0, 0, 0.8),
-    0 0 0 1px rgba(0, 0, 0, 0.5);
+    0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+    0 16px 40px -12px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.3);
   position: relative;
 }
 
@@ -79,26 +88,26 @@ body {
   background: var(--bg-deck-inset);
   border: 1px solid var(--border-deck);
   border-radius: 14px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6) inset;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4) inset;
 }
 
-/* Amber Vacuum Tube Glow */
+/* Accent Glow */
 .tube-glow {
-  color: var(--amber-bright);
-  text-shadow: 0 0 12px rgba(245, 158, 11, 0.6);
+  color: var(--accent-bright);
+  text-shadow: 0 0 12px var(--accent-glow);
 }
 
 .tube-glow-box {
-  border-color: var(--amber-core);
-  box-shadow: 0 0 20px var(--amber-glow);
+  border-color: var(--accent-core);
+  box-shadow: 0 0 20px var(--accent-glow);
 }
 
-/* Analog Buttons */
+/* Buttons */
 .btn-analog {
-  background: linear-gradient(180deg, #2a2723 0%, #1e1b18 100%);
+  background: linear-gradient(180deg, #1e2a38 0%, #162030 100%);
   color: var(--text-cream);
   border: 1px solid var(--border-deck-light);
-  border-bottom: 2px solid #141210;
+  border-bottom: 2px solid #0c1420;
   border-radius: 12px;
   padding: 10px 18px;
   font-family: var(--font-sans);
@@ -110,60 +119,60 @@ body {
   justify-content: center;
   gap: 8px;
   transition: all 0.15s ease;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .btn-analog:hover {
-  background: linear-gradient(180deg, #35312c 0%, #25221e 100%);
-  border-color: #4a453e;
+  background: linear-gradient(180deg, #283848 0%, #1e3040 100%);
+  border-color: #4a6580;
   transform: translateY(-1px);
 }
 
 .btn-analog:active {
   transform: translateY(1px);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6) inset;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5) inset;
 }
 
 .btn-amber {
-  background: linear-gradient(180deg, #d97706 0%, #b45309 100%);
-  color: #0c0b0a;
-  border: 1px solid #fbbf24;
-  border-bottom: 2px solid #78350f;
+  background: linear-gradient(180deg, #0891b2 0%, #0e7490 100%);
+  color: #ffffff;
+  border: 1px solid #22d3ee;
+  border-bottom: 2px solid #065a75;
   font-weight: 700;
-  box-shadow: 0 4px 16px var(--amber-glow);
+  box-shadow: 0 4px 16px var(--accent-glow);
 }
 
 .btn-amber:hover {
-  background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
+  background: linear-gradient(180deg, #06b6d4 0%, #0891b2 100%);
   filter: brightness(1.08);
 }
 
-/* Stamped Paper Ticket Badge */
+/* Stamped Badge */
 .paper-badge {
-  background: #1e1c19;
+  background: #0f1a25;
   border: 1px dashed var(--border-deck-light);
   border-radius: 8px;
   padding: 6px 12px;
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--amber-bright);
+  color: var(--accent-bright);
   letter-spacing: 1px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-/* Tactile Range Slider */
+/* Range Slider */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
   height: 6px;
-  background: #141210;
+  background: #0c1117;
   border: 1px solid var(--border-deck);
   border-radius: 6px;
   outline: none;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5) inset;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4) inset;
 }
 
 input[type="range"]::-webkit-slider-thumb {
@@ -172,17 +181,28 @@ input[type="range"]::-webkit-slider-thumb {
   width: 22px;
   height: 22px;
   border-radius: 4px;
-  background: linear-gradient(180deg, #44403c 0%, #292524 100%);
-  border: 1px solid #78716c;
-  border-bottom: 2px solid #1c1917;
+  background: linear-gradient(180deg, #344a60 0%, #1e3040 100%);
+  border: 1px solid #5a7a95;
+  border-bottom: 2px solid #0c1420;
   cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
   position: relative;
 }
 
 input[type="range"]::-webkit-slider-thumb:hover {
-  background: linear-gradient(180deg, #57534e 0%, #292524 100%);
-  border-color: var(--amber-core);
+  background: linear-gradient(180deg, #4a6580 0%, #283848 100%);
+  border-color: var(--accent-core);
+}
+
+/* Firefox Range Slider Thumb */
+input[type="range"]::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #344a60 0%, #1e3040 100%);
+  border: 1px solid #5a7a95;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 /* Custom Scrollbar */
@@ -204,15 +224,15 @@ input[type="range"]::-webkit-slider-thumb:hover {
   background: var(--border-deck-light);
 }
 
-/* Vintage Chassis Corner Rivets / Screws */
+/* Corner Rivets */
 .corner-rivet {
   position: absolute;
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #78716c 0%, #292524 60%, #0c0b0a 100%);
-  border: 1px solid #141210;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), inset 0 1px 1px rgba(255, 255, 255, 0.25);
+  background: radial-gradient(circle at 35% 35%, #5a7a95 0%, #1e3040 60%, #0c1117 100%);
+  border: 1px solid #0c1117;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.2);
   pointer-events: none;
   z-index: 2;
 }
@@ -227,6 +247,15 @@ input[type="range"]::-webkit-slider-thumb:hover {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
+}
+
+/* Slow spin animation for disc icon */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.spin-slow {
+  animation: spin-slow 8s linear infinite;
 }
 
 /* Responsive Breakpoints */
@@ -256,4 +285,3 @@ input[type="range"]::-webkit-slider-thumb:hover {
     display: none !important;
   }
 }
-

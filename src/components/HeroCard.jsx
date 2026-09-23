@@ -10,7 +10,7 @@ export default function HeroCard({ mode, setMode }) {
       margin: '0 auto 20px',
       width: '100%',
       position: 'relative',
-      background: 'linear-gradient(180deg, #181614 0%, #11100e 100%)',
+      background: 'linear-gradient(180deg, #161d26 0%, #0f1419 100%)',
       border: '1px solid var(--border-deck)',
       borderRadius: '24px',
       boxShadow: '0 20px 48px -12px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.06)',
@@ -82,7 +82,7 @@ export default function HeroCard({ mode, setMode }) {
           gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
           gap: '12px',
           marginBottom: '24px',
-          background: 'rgba(14, 13, 12, 0.75)',
+          background: 'rgba(12, 17, 23, 0.75)',
           padding: '16px',
           borderRadius: '16px',
           border: '1px solid var(--border-deck)'
@@ -183,17 +183,17 @@ export default function HeroCard({ mode, setMode }) {
               gap: '14px',
               borderRadius: '14px',
               background: mode === 'host' 
-                ? 'linear-gradient(180deg, #2b251e 0%, #1e1914 100%)' 
-                : 'linear-gradient(180deg, #181614 0%, #12100f 100%)',
-              borderColor: mode === 'host' ? 'var(--amber-bright)' : 'var(--border-deck)',
-              boxShadow: mode === 'host' ? '0 4px 20px var(--amber-glow), inset 0 1px 0 rgba(251, 191, 36, 0.2)' : 'none'
+                ? 'linear-gradient(180deg, #1a2838 0%, #121d28 100%)' 
+                : 'linear-gradient(180deg, #141b24 0%, #0f1419 100%)',
+              borderColor: mode === 'host' ? 'var(--accent-bright)' : 'var(--border-deck)',
+              boxShadow: mode === 'host' ? '0 4px 20px var(--accent-glow), inset 0 1px 0 rgba(34, 211, 238, 0.15)' : 'none'
             }}
           >
             <div style={{
               width: '38px',
               height: '38px',
               borderRadius: '10px',
-              background: mode === 'host' ? 'var(--amber-core)' : '#262320',
+              background: mode === 'host' ? 'var(--accent-core)' : '#1e2a38',
               color: mode === 'host' ? '#0c0b0a' : 'var(--text-muted)',
               display: 'flex',
               alignItems: 'center',
@@ -207,7 +207,7 @@ export default function HeroCard({ mode, setMode }) {
               <div style={{
                 fontSize: '14px',
                 fontWeight: '700',
-                color: mode === 'host' ? 'var(--amber-bright)' : 'var(--text-cream)'
+                color: mode === 'host' ? 'var(--accent-bright)' : 'var(--text-cream)'
               }}>
                 🎙️ Host the Room (Broadcaster)
               </div>
@@ -227,17 +227,17 @@ export default function HeroCard({ mode, setMode }) {
               gap: '14px',
               borderRadius: '14px',
               background: mode === 'receiver' 
-                ? 'linear-gradient(180deg, #2b251e 0%, #1e1914 100%)' 
-                : 'linear-gradient(180deg, #181614 0%, #12100f 100%)',
-              borderColor: mode === 'receiver' ? 'var(--amber-bright)' : 'var(--border-deck)',
-              boxShadow: mode === 'receiver' ? '0 4px 20px var(--amber-glow), inset 0 1px 0 rgba(251, 191, 36, 0.2)' : 'none'
+                ? 'linear-gradient(180deg, #1a2838 0%, #121d28 100%)' 
+                : 'linear-gradient(180deg, #141b24 0%, #0f1419 100%)',
+              borderColor: mode === 'receiver' ? 'var(--accent-bright)' : 'var(--border-deck)',
+              boxShadow: mode === 'receiver' ? '0 4px 20px var(--accent-glow), inset 0 1px 0 rgba(34, 211, 238, 0.15)' : 'none'
             }}
           >
             <div style={{
               width: '38px',
               height: '38px',
               borderRadius: '10px',
-              background: mode === 'receiver' ? 'var(--amber-core)' : '#262320',
+              background: mode === 'receiver' ? 'var(--accent-core)' : '#1e2a38',
               color: mode === 'receiver' ? '#0c0b0a' : 'var(--text-muted)',
               display: 'flex',
               alignItems: 'center',
@@ -251,7 +251,7 @@ export default function HeroCard({ mode, setMode }) {
               <div style={{
                 fontSize: '14px',
                 fontWeight: '700',
-                color: mode === 'receiver' ? 'var(--amber-bright)' : 'var(--text-cream)'
+                color: mode === 'receiver' ? 'var(--accent-bright)' : 'var(--text-cream)'
               }}>
                 🎧 Tune In as Speaker (Receiver)
               </div>

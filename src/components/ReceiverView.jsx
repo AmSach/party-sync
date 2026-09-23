@@ -3,10 +3,11 @@ import Peer from 'peerjs';
 import { 
   Speaker, Sliders, Volume2, Maximize, Smartphone, 
   CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck, Power,
-  Clock, Music, Bluetooth, Headphones, Cable, RefreshCw
+  Clock, Music, Bluetooth, Headphones, Cable, RefreshCw, Mic, Target
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
 import { clockSync } from '../utils/clockSync';
+import { acousticCalibrator } from '../utils/acousticCalibrate';
 import Visualizer from './Visualizer';
 
 export default function ReceiverView({ initialRoomId = '', onBack }) {
@@ -21,11 +22,14 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const [isFullscreenVisualizer, setIsFullscreenVisualizer] = useState(false);
   const [isFlashing, setIsFlashing] = useState(false);
   const [clockInfo, setClockInfo] = useState({ isSynced: false, rtt: 0, offset: 0 });
+  const [autoSyncStatus, setAutoSyncStatus] = useState(null); // null | 'calibrating' | 'done' | 'error'
+  const [autoSyncMsg, setAutoSyncMsg] = useState('');
 
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const wakeLockRef = useRef(null);
   const audioElRef = useRef(null);
+  const webrtcStreamRef = useRef(null);
 
   const requestWakeLock = async () => {
     try {
@@ -47,10 +51,24 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       setClockInfo(info);
     };
 
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible') {
+        if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
+          try { await audioProcessor.ctx.resume(); } catch (e) {}
+        }
+        if (wakeLockRef.current === null && isConnected) {
+          requestWakeLock();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       disconnect();
     };
-  }, [initialRoomId]);
+  }, [initialRoomId, isConnected]);
 
   const triggerVisualFlash = () => {
     setIsFlashing(true);
@@ -122,6 +140,13 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         } else if (data.type === 'SYNC_CLAPPER') {
           // Fire scheduled acoustic tick & visual flash at exact microsecond
           clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash);
+        } else if (data.type === 'CALIBRATE_SCHEDULED') {
+          runAcousticCalibration(data.targetMasterTime);
+        } else if (data.type === 'START_CALIBRATE_CLIENT') {
+          startAutoSync();
+        } else if (data.type === 'CALIBRATE_ERROR') {
+          setAutoSyncStatus('error');
+          setAutoSyncMsg(data.message || 'Calibration aborted by host.');
         }
       });
 
@@ -143,6 +168,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         
         // Route audio through Web Audio API with soft-knee limiter and delay
         audioProcessor.setupStream(remoteAudioStream);
+        webrtcStreamRef.current = remoteAudioStream; // Store for acoustic auto-sync mic calibration
 
         // CRITICAL FIX FOR AUDIO DISTORTION:
         // The hidden <audio> element is muted so it does NOT play simultaneously with Web Audio!
@@ -206,6 +232,65 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
   };
 
+  const startAutoSync = () => {
+    if (!connRef.current || !connRef.current.open) {
+      setAutoSyncStatus('error');
+      setAutoSyncMsg('Not connected to Host. Please join session first.');
+      return;
+    }
+    audioProcessor.init();
+    if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
+      audioProcessor.ctx.resume();
+    }
+    setAutoSyncStatus('calibrating');
+    setAutoSyncMsg('Requesting acoustic calibration pulse from Host...');
+    connRef.current.send({ type: 'CALIBRATE_REQUEST' });
+  };
+
+  const runAcousticCalibration = (targetMasterTime) => {
+    audioProcessor.init();
+    const ctx = audioProcessor.ctx;
+    if (!ctx) {
+      setAutoSyncStatus('error');
+      setAutoSyncMsg('Web Audio context unavailable.');
+      return;
+    }
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+
+    const prevVol = volume;
+    // Duck volume during calibration so the two calibration tones stand out
+    audioProcessor.setVolume(prevVol * 0.15);
+
+    acousticCalibrator.runReceiverCalibration({
+      audioCtx: ctx,
+      receiverPlaybackNode: audioProcessor.delayNode || audioProcessor.gainNode,
+      targetMasterTime,
+      clockSyncInstance: clockSync,
+      onProgress: (msg) => {
+        setAutoSyncMsg(msg);
+      },
+      onSuccess: (result) => {
+        audioProcessor.setVolume(prevVol);
+        const currentDelay = delayMs;
+        // errorMs > 0 means Phone was heard too late -> reduce phone delay
+        // errorMs < 0 means Phone was heard too early -> increase phone delay
+        const newDelay = Math.max(-90, Math.min(350, Math.round(currentDelay - result.errorMs)));
+        setDelayMs(newDelay);
+        audioProcessor.setDelay(newDelay);
+        setAutoSyncStatus('done');
+        setAutoSyncMsg(`✅ Phase Locked! Offset: ${result.errorMs > 0 ? '+' : ''}${result.errorMs}ms compensated. New delay: ${newDelay}ms.`);
+        triggerVisualFlash();
+      },
+      onError: (errMsg) => {
+        audioProcessor.setVolume(prevVol);
+        setAutoSyncStatus('error');
+        setAutoSyncMsg(errMsg);
+      }
+    });
+  };
+
   const disconnect = () => {
     if (connRef.current) connRef.current.close();
     if (peerRef.current) peerRef.current.destroy();
@@ -229,8 +314,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           gap: '20px', 
           position: 'relative',
           transition: 'box-shadow 0.08s ease, border-color 0.08s ease',
-          borderColor: isFlashing ? 'var(--amber-bright)' : 'var(--border-deck)',
-          boxShadow: isFlashing ? '0 0 35px var(--amber-bright)' : '0 20px 48px -12px rgba(0, 0, 0, 0.85)'
+          borderColor: isFlashing ? 'var(--accent-bright)' : 'var(--border-deck)',
+          boxShadow: isFlashing ? '0 0 35px var(--accent-bright)' : '0 20px 48px -12px rgba(0, 0, 0, 0.85)'
         }}
       >
         {/* Chassis Corner Rivets */}
@@ -247,10 +332,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 width: '10px', 
                 height: '10px', 
                 borderRadius: '50%', 
-                background: isAudioActive ? 'var(--amber-bright)' : '#44403c',
-                boxShadow: isAudioActive ? '0 0 10px var(--amber-core)' : 'none'
+                background: isAudioActive ? 'var(--accent-bright)' : '#344a60',
+                boxShadow: isAudioActive ? '0 0 10px var(--accent-core)' : 'none'
               }} />
-              <span className="font-mono" style={{ fontSize: '11px', letterSpacing: '1.5px', color: isAudioActive ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
+              <span className="font-mono" style={{ fontSize: '11px', letterSpacing: '1.5px', color: isAudioActive ? 'var(--accent-bright)' : 'var(--text-dim)' }}>
                 {isAudioActive ? 'STUDIO FEED ACTIVE' : 'RECEIVER STANDBY'}
               </span>
             </div>
@@ -279,10 +364,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                   style={{
                     width: '100%',
                     padding: '14px',
-                    background: '#0d0c0a',
+                    background: '#0c1117',
                     border: '1px solid var(--border-deck)',
                     borderRadius: '10px',
-                    color: 'var(--amber-bright)',
+                    color: 'var(--accent-bright)',
                     fontSize: '18px',
                     fontWeight: '700',
                     letterSpacing: '2px',
@@ -301,7 +386,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                   style={{
                     width: '100%',
                     padding: '12px 14px',
-                    background: '#0d0c0a',
+                    background: '#0c1117',
                     border: '1px solid var(--border-deck)',
                     borderRadius: '10px',
                     color: 'var(--text-cream)',
@@ -328,8 +413,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
             <div style={{
               padding: '14px 16px',
               borderRadius: '12px',
-              background: isAudioActive ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.1)',
-              border: `1px solid ${isAudioActive ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.25)'}`,
+              background: isAudioActive ? 'rgba(16, 185, 129, 0.12)' : 'rgba(6, 182, 212, 0.1)',
+              border: `1px solid ${isAudioActive ? 'rgba(16, 185, 129, 0.4)' : 'rgba(6, 182, 212, 0.25)'}`,
               display: 'flex',
               flexDirection: 'column',
               gap: '6px'
@@ -340,10 +425,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     width: '8px',
                     height: '8px',
                     borderRadius: '50%',
-                    background: isAudioActive ? '#10b981' : '#f59e0b',
-                    boxShadow: isAudioActive ? '0 0 8px #10b981' : 'none'
+                    background: isAudioActive ? '#10b981' : 'var(--accent-core)',
+                    boxShadow: isAudioActive ? '0 0 8px #10b981' : '0 0 8px var(--accent-glow)'
                   }} />
-                  <strong className="font-mono" style={{ fontSize: '12px', color: isAudioActive ? '#10b981' : 'var(--amber-bright)' }}>
+                  <strong className="font-mono" style={{ fontSize: '12px', color: isAudioActive ? '#10b981' : 'var(--accent-bright)' }}>
                     {isAudioActive ? '256KBPS STUDIO HI-FI STREAMING' : 'LINKED TO HOST CLOCK'}
                   </strong>
                 </div>
@@ -383,9 +468,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     padding: '10px 8px',
                     flexDirection: 'column',
                     gap: '4px',
-                    background: hardwareProfile === 'phone' ? 'var(--amber-core)' : '#171513',
-                    color: hardwareProfile === 'phone' ? '#0c0b0a' : 'var(--text-cream)',
-                    borderColor: hardwareProfile === 'phone' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                    background: hardwareProfile === 'phone' ? 'var(--accent-core)' : '#121d28',
+                    color: hardwareProfile === 'phone' ? '#0f1419' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'phone' ? 'var(--accent-bright)' : 'var(--border-deck)'
                   }}
                 >
                   <Smartphone size={16} />
@@ -400,9 +485,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     padding: '10px 8px',
                     flexDirection: 'column',
                     gap: '4px',
-                    background: hardwareProfile === 'bt_speaker' ? 'var(--amber-core)' : '#171513',
-                    color: hardwareProfile === 'bt_speaker' ? '#0c0b0a' : 'var(--text-cream)',
-                    borderColor: hardwareProfile === 'bt_speaker' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                    background: hardwareProfile === 'bt_speaker' ? 'var(--accent-core)' : '#121d28',
+                    color: hardwareProfile === 'bt_speaker' ? '#0f1419' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'bt_speaker' ? 'var(--accent-bright)' : 'var(--border-deck)'
                   }}
                 >
                   <Bluetooth size={16} />
@@ -417,9 +502,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     padding: '10px 8px',
                     flexDirection: 'column',
                     gap: '4px',
-                    background: hardwareProfile === 'bt_headphones' ? 'var(--amber-core)' : '#171513',
-                    color: hardwareProfile === 'bt_headphones' ? '#0c0b0a' : 'var(--text-cream)',
-                    borderColor: hardwareProfile === 'bt_headphones' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                    background: hardwareProfile === 'bt_headphones' ? 'var(--accent-core)' : '#121d28',
+                    color: hardwareProfile === 'bt_headphones' ? '#0f1419' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'bt_headphones' ? 'var(--accent-bright)' : 'var(--border-deck)'
                   }}
                 >
                   <Headphones size={16} />
@@ -434,9 +519,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     padding: '10px 8px',
                     flexDirection: 'column',
                     gap: '4px',
-                    background: hardwareProfile === 'aux' ? 'var(--amber-core)' : '#171513',
-                    color: hardwareProfile === 'aux' ? '#0c0b0a' : 'var(--text-cream)',
-                    borderColor: hardwareProfile === 'aux' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                    background: hardwareProfile === 'aux' ? 'var(--accent-core)' : '#121d28',
+                    color: hardwareProfile === 'aux' ? '#0f1419' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'aux' ? 'var(--accent-bright)' : 'var(--border-deck)'
                   }}
                 >
                   <Cable size={16} />
@@ -446,13 +531,80 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               </div>
             </div>
 
+            {/* 1-TAP AUTOMATED ACOUSTIC SYNC (MIC CALIBRATION) */}
+            <div className="analog-inset" style={{ 
+              padding: '18px', 
+              display: 'flex', 
+              flexDirection: 'column', 
+              gap: '12px',
+              border: autoSyncStatus === 'calibrating' 
+                ? '1px solid var(--accent-bright)' 
+                : autoSyncStatus === 'done' 
+                ? '1px solid #10b981' 
+                : autoSyncStatus === 'error'
+                ? '1px solid #ef4444'
+                : '1px solid var(--border-deck)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Mic size={16} color="var(--accent-bright)" />
+                  <strong className="font-mono" style={{ fontSize: '12px', color: 'var(--accent-bright)', letterSpacing: '0.8px' }}>
+                    AUTOMATED ACOUSTIC AUTO-SYNC
+                  </strong>
+                </div>
+                <span className="paper-badge" style={{ 
+                  fontSize: '10px', 
+                  padding: '2px 8px',
+                  color: autoSyncStatus === 'done' ? '#10b981' : autoSyncStatus === 'error' ? '#ef4444' : 'var(--accent-bright)'
+                }}>
+                  {autoSyncStatus === 'calibrating' ? 'CALIBRATING...' : autoSyncStatus === 'done' ? '● LOCKED' : 'MIC-POWERED'}
+                </span>
+              </div>
+
+              <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
+                Hold your phone's speaker close to the host laptop speaker, then tap Calibrate. The phone microphone listens to the arrival times and locks phase alignment automatically.
+              </p>
+
+              {autoSyncMsg && (
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  background: autoSyncStatus === 'error' ? 'rgba(239, 68, 68, 0.15)' : autoSyncStatus === 'done' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(6, 182, 212, 0.15)',
+                  border: `1px solid ${autoSyncStatus === 'error' ? '#ef4444' : autoSyncStatus === 'done' ? '#10b981' : 'var(--accent-core)'}`,
+                  fontSize: '11px',
+                  fontFamily: 'monospace',
+                  color: autoSyncStatus === 'error' ? '#fca5a5' : autoSyncStatus === 'done' ? '#6ee7b7' : 'var(--accent-bright)'
+                }}>
+                  {autoSyncMsg}
+                </div>
+              )}
+
+              <button 
+                onClick={startAutoSync} 
+                disabled={autoSyncStatus === 'calibrating'}
+                className="btn-analog btn-amber" 
+                style={{ 
+                  padding: '14px', 
+                  fontSize: '14px',
+                  opacity: autoSyncStatus === 'calibrating' ? 0.7 : 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
+                }}
+              >
+                <Target size={18} />
+                {autoSyncStatus === 'calibrating' ? 'Listening & Calibrating...' : '🎯 Auto-Calibrate (Mic Sync)'}
+              </button>
+            </div>
+
             {/* PRECISION ACOUSTIC NUDGE CALIBRATION */}
             <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <div style={{ fontSize: '12px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Clock size={14} color="var(--amber-bright)" />
-                    Phase & Acoustic Latency Alignment:
+                    <Clock size={14} color="var(--accent-bright)" />
+                    Minute Manual Fine-Tuning:
                   </div>
                   <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
                     Compensates for speaker processing and physical room distance
@@ -499,7 +651,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
                 <span>Faster (-90ms)</span>
-                <span style={{ color: 'var(--amber-bright)' }}>Phase Synchronized</span>
+                <span style={{ color: 'var(--accent-bright)' }}>Phase Synchronized</span>
                 <span>Bluetooth Delay (+350ms)</span>
               </div>
             </div>
@@ -508,7 +660,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
             <div className="analog-inset" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>OUTPUT LEVEL:</span>
-                <span className="font-mono" style={{ fontSize: '12px', color: 'var(--amber-bright)' }}>{Math.round(volume * 100)}%</span>
+                <span className="font-mono" style={{ fontSize: '12px', color: 'var(--accent-bright)' }}>{Math.round(volume * 100)}%</span>
               </div>
               <input 
                 type="range" 
@@ -523,7 +675,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
             {/* Lofi Analog VU Meter */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span className="font-mono" style={{ fontSize: '10px', color: 'var(--amber-bright)', letterSpacing: '1px' }}>
+                <span className="font-mono" style={{ fontSize: '10px', color: 'var(--accent-bright)', letterSpacing: '1px' }}>
                   ● ANALOG LEVEL MONITOR
                 </span>
                 <button 
