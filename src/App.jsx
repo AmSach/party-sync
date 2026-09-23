@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Radio, Speaker, Tv, Download, Disc3, Sparkles } from 'lucide-react';
 import ThreeBackground from './components/ThreeBackground';
+import HeroCard from './components/HeroCard';
 import HostView from './components/HostView';
 import ReceiverView from './components/ReceiverView';
 
@@ -82,8 +83,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* Unified Analog Mode Rocker Switch */}
-          <div style={{ 
+          {/* Unified Analog Mode Rocker Switch (Desktop) */}
+          <div className="hide-on-mobile" style={{ 
             background: '#100f0d', 
             border: '1px solid var(--border-deck)', 
             borderRadius: '12px', 
@@ -105,7 +106,7 @@ export default function App() {
                 boxShadow: mode === 'host' ? '0 2px 8px var(--amber-glow)' : 'none'
               }}
             >
-              🎙️ TRANSMIT (HOST)
+              🎙️ HOST DECK
             </button>
 
             <button
@@ -122,23 +123,41 @@ export default function App() {
                 boxShadow: mode === 'receiver' ? '0 2px 8px var(--amber-glow)' : 'none'
               }}
             >
-              🎧 TUNE IN (SPEAKER)
+              🎧 SATELLITE
             </button>
           </div>
 
-          {/* Right Tools */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* Right Tools & Mobile Mode Toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={() => setMode(mode === 'host' ? 'receiver' : 'host')}
+              className="btn-analog show-on-mobile"
+              style={{
+                padding: '6px 10px',
+                fontSize: '11px',
+                fontFamily: 'monospace',
+                borderColor: 'var(--amber-bright)',
+                color: 'var(--amber-bright)'
+              }}
+            >
+              {mode === 'host' ? '🎙️ HOST' : '🎧 SPEAKER'}
+            </button>
+
             {installPrompt && (
               <button onClick={handleInstallPWA} className="btn-analog" style={{ fontSize: '11px', padding: '6px 12px' }}>
                 <Download size={13} />
-                Install
+                <span className="hide-on-mobile">Install</span>
               </button>
             )}
           </div>
         </header>
 
         {/* Console Body */}
-        <main style={{ flex: 1, padding: '16px 8px 32px', display: 'flex', flexDirection: 'column' }}>
+        <main style={{ flex: 1, padding: '16px 12px 36px', display: 'flex', flexDirection: 'column' }}>
+          {/* Welcoming, Reassuring Human Hero Onboarding Card */}
+          <HeroCard mode={mode} setMode={setMode} />
+
+          {/* Active Broadcast or Receiver Station */}
           {mode === 'host' ? (
             <HostView onBack={() => setMode('receiver')} />
           ) : (

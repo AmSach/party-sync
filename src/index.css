@@ -203,3 +203,57 @@ input[type="range"]::-webkit-slider-thumb:hover {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-deck-light);
 }
+
+/* Vintage Chassis Corner Rivets / Screws */
+.corner-rivet {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #78716c 0%, #292524 60%, #0c0b0a 100%);
+  border: 1px solid #141210;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), inset 0 1px 1px rgba(255, 255, 255, 0.25);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.rivet-tl { top: 12px; left: 12px; }
+.rivet-tr { top: 12px; right: 12px; }
+.rivet-bl { bottom: 12px; left: 12px; }
+.rivet-br { bottom: 12px; right: 12px; }
+
+/* Input Channels Balanced Grid */
+.input-channels-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+/* Responsive Breakpoints */
+@media (max-width: 640px) {
+  .input-channels-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .analog-deck {
+    padding: 16px !important;
+    border-radius: 16px !important;
+  }
+
+  .hero-chassis {
+    padding: 20px 16px !important;
+    border-radius: 18px !important;
+  }
+
+  .hide-on-mobile {
+    display: none !important;
+  }
+}
+
+@media (min-width: 641px) {
+  .show-on-mobile {
+    display: none !important;
+  }
+}
+

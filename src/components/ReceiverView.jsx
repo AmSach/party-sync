@@ -21,6 +21,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const wakeLockRef = useRef(null);
+  const audioElRef = useRef(null);
 
   const requestWakeLock = async () => {
     try {
@@ -43,10 +44,15 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   }, [initialRoomId]);
 
   const connectToHost = () => {
-    if (!roomId) {
-      alert('Please enter a valid Session Code!');
+    const cleanRoom = roomId.trim();
+    if (!cleanRoom) {
+      alert('Please enter a valid Session Code (e.g. 4821)!');
       return;
     }
+
+    const targetRoomId = cleanRoom.toUpperCase().startsWith('SESSION-')
+      ? cleanRoom.toUpperCase()
+      : `SESSION-${cleanRoom.replace(/[^0-9A-Za-z]/g, '')}`;
 
     setStatusText('Tuning into session...');
     audioProcessor.init();
@@ -57,7 +63,11 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
     });
@@ -66,7 +76,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       console.log('[Receiver] Connected to peer mesh:', id);
       setStatusText('Synchronizing with Host...');
 
-      const conn = peer.connect(roomId, {
+      const conn = peer.connect(targetRoomId, {
         metadata: { name: deviceName }
       });
 
@@ -79,6 +89,16 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       conn.on('data', (data) => {
         if (data.type === 'WELCOME') {
           console.log('[Receiver] Host media title:', data.title);
+          if (data.isAudioActive) {
+            setStatusText('Host broadcasting • Connecting audio...');
+          } else {
+            setStatusText('● Tuned In • Waiting for Host to select audio');
+          }
+        } else if (data.type === 'AUDIO_STARTED') {
+          setStatusText('● Host started audio • Connecting...');
+        } else if (data.type === 'AUDIO_STOPPED') {
+          setIsAudioActive(false);
+          setStatusText('● Host paused audio feed');
         }
       });
 
@@ -96,7 +116,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       call.answer();
 
       call.on('stream', (remoteAudioStream) => {
+        console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
         audioProcessor.setupStream(remoteAudioStream);
+        if (audioElRef.current) {
+          audioElRef.current.srcObject = remoteAudioStream;
+          audioElRef.current.play().catch(e => console.log('Audio element play notice:', e));
+        }
         setIsAudioActive(true);
         setStatusText('● Live Synchronized Playout');
       });
@@ -109,7 +134,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
     peer.on('error', (err) => {
       console.error('[Receiver] Peer error:', err);
-      setStatusText('Station connection failed. Verify session code.');
+      if (err.type === 'peer-unavailable') {
+        setStatusText(`⚠️ Host ${targetRoomId.replace('SESSION-', '#')} not found. Verify code or make sure Host is open!`);
+      } else {
+        setStatusText('Station connection failed. Verify session code.');
+      }
+      setIsConnected(false);
     });
 
     peerRef.current = peer;
@@ -147,7 +177,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     <div style={{ maxWidth: '580px', margin: '0 auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
       
       {/* Console Top Deck */}
-      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px', position: 'relative' }}>
+        {/* Chassis Corner Rivets */}
+        <div className="corner-rivet rivet-tl" />
+        <div className="corner-rivet rivet-tr" />
+        <div className="corner-rivet rivet-bl" />
+        <div className="corner-rivet rivet-br" />
         
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -179,10 +214,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             <div className="analog-inset" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SESSION CODE:</label>
+                <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SESSION / ROOM CODE:</label>
                 <input 
                   type="text" 
-                  placeholder="e.g. SESSION-4821" 
+                  placeholder="e.g. 4821 or SESSION-4821" 
                   value={roomId} 
                   onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                   className="font-mono"
@@ -205,7 +240,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SPEAKER IDENTIFIER:</label>
                 <input 
                   type="text" 
-                  placeholder="e.g. Left Table, Car Stereo, JBL" 
+                  placeholder="e.g. Left Table, Car Stereo, Bedroom Phone" 
                   value={deviceName} 
                   onChange={(e) => setDeviceName(e.target.value)}
                   style={{
@@ -223,7 +258,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
             <button onClick={connectToHost} className="btn-analog btn-amber" style={{ padding: '16px', fontSize: '15px' }}>
               <Power size={18} />
-              Engage Satellite Speaker
+              🔊 Activate Speaker & Join Party
             </button>
 
             <div style={{ textAlign: 'center', fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
@@ -353,7 +388,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         )}
 
       </div>
-
+      
+      {/* Hidden Audio Element for Mobile Browser Playback Assurance */}
+      <audio ref={audioElRef} autoPlay playsInline style={{ display: 'none' }} />
     </div>
   );
 }

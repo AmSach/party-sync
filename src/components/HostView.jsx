@@ -24,6 +24,8 @@ export default function HostView({ onBack }) {
   const audioContextRef = useRef(null);
   const synthIntervalRef = useRef(null);
   const analyserRef = useRef(null);
+  const activeConnectionsRef = useRef(new Map());
+  const activeMediaTitleRef = useRef('No audio source selected');
 
   useEffect(() => {
     const randomCode = 'SESSION-' + Math.floor(1000 + Math.random() * 9000);
@@ -36,39 +38,59 @@ export default function HostView({ onBack }) {
       color: { dark: '#f4efe6', light: '#141210' }
     }).then(url => setQrDataUrl(url));
 
+    // CRITICAL FIX: Initialize Host Peer on the signaling network immediately!
+    initHostPeer(randomCode);
+
     return () => {
-      stopBroadcasting();
+      stopBroadcasting(true);
     };
   }, []);
 
-  const initHostPeer = (stream) => {
-    if (peerRef.current) peerRef.current.destroy();
+  const initHostPeer = (hostRoomId) => {
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
 
-    const peer = new Peer(roomId, {
+    const peer = new Peer(hostRoomId, {
       debug: 1,
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
     });
 
     peer.on('open', (id) => {
-      console.log('[Host] Room console active:', id);
+      console.log('[Host] Room console active & listening for satellites:', id);
     });
 
     peer.on('connection', (conn) => {
+      console.log('[Host] Incoming peer connection attempt:', conn.peer);
+
       conn.on('open', () => {
-        conn.send({ type: 'WELCOME', title: activeMediaTitle });
+        console.log('[Host] Satellite data channel established:', conn.peer);
+        activeConnectionsRef.current.set(conn.peer, conn);
+
+        conn.send({ 
+          type: 'WELCOME', 
+          title: activeMediaTitleRef.current,
+          isAudioActive: !!audioStreamRef.current
+        });
 
         setConnectedPeers(prev => [
           ...prev.filter(p => p.id !== conn.peer),
           { id: conn.peer, name: conn.metadata?.name || `Phone (${conn.peer.slice(-4)})`, role: 'stereo' }
         ]);
 
-        if (audioStreamRef.current) {
-          peer.call(conn.peer, audioStreamRef.current);
+        // If audio stream is already playing, immediately call this new satellite
+        if (audioStreamRef.current && peerRef.current) {
+          console.log(`[Host] Piping active audio stream to new satellite: ${conn.peer}`);
+          peerRef.current.call(conn.peer, audioStreamRef.current);
         }
       });
 
@@ -79,8 +101,20 @@ export default function HostView({ onBack }) {
       });
 
       conn.on('close', () => {
+        console.log('[Host] Satellite disconnected:', conn.peer);
+        activeConnectionsRef.current.delete(conn.peer);
         setConnectedPeers(prev => prev.filter(p => p.id !== conn.peer));
       });
+
+      conn.on('error', (err) => {
+        console.warn('[Host] Peer connection error:', err);
+        activeConnectionsRef.current.delete(conn.peer);
+        setConnectedPeers(prev => prev.filter(p => p.id !== conn.peer));
+      });
+    });
+
+    peer.on('error', (err) => {
+      console.error('[Host] Signaling/Peer error:', err);
     });
 
     peerRef.current = peer;
@@ -190,7 +224,21 @@ export default function HostView({ onBack }) {
   const setupHostAudio = (stream) => {
     audioStreamRef.current = stream;
     setIsBroadcasting(true);
-    initHostPeer(stream);
+
+    console.log(`[Host] Broadcasting audio stream to ${activeConnectionsRef.current.size} connected satellites`);
+    activeConnectionsRef.current.forEach((conn, peerId) => {
+      if (peerRef.current && peerRef.current.open) {
+        console.log(`[Host] Calling satellite ${peerId} with audio stream`);
+        try {
+          peerRef.current.call(peerId, stream);
+        } catch (err) {
+          console.error(`[Host] Error calling peer ${peerId}:`, err);
+        }
+      }
+      if (conn.open) {
+        conn.send({ type: 'AUDIO_STARTED', title: activeMediaTitleRef.current });
+      }
+    });
 
     try {
       const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
@@ -205,16 +253,29 @@ export default function HostView({ onBack }) {
     }
   };
 
-  const stopBroadcasting = () => {
+  const stopBroadcasting = (fullTeardown = false) => {
     setIsBroadcasting(false);
-    if (synthIntervalRef.current) clearInterval(synthIntervalRef.current);
+    if (synthIntervalRef.current) {
+      clearInterval(synthIntervalRef.current);
+      synthIntervalRef.current = null;
+    }
     if (audioStreamRef.current) {
       audioStreamRef.current.getTracks().forEach(t => t.stop());
+      audioStreamRef.current = null;
     }
-    if (peerRef.current) {
-      peerRef.current.destroy();
+
+    activeConnectionsRef.current.forEach(conn => {
+      if (conn.open) conn.send({ type: 'AUDIO_STOPPED' });
+    });
+
+    if (fullTeardown) {
+      if (peerRef.current) {
+        peerRef.current.destroy();
+        peerRef.current = null;
+      }
+      activeConnectionsRef.current.clear();
+      setConnectedPeers([]);
     }
-    setConnectedPeers([]);
   };
 
   const copyShareLink = () => {
@@ -228,8 +289,13 @@ export default function HostView({ onBack }) {
     <div style={{ maxWidth: '960px', margin: '0 auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       
       {/* Console Top Deck */}
-      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-        
+      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px', position: 'relative' }}>
+        {/* Chassis Corner Rivets */}
+        <div className="corner-rivet rivet-tl" />
+        <div className="corner-rivet rivet-tr" />
+        <div className="corner-rivet rivet-bl" />
+        <div className="corner-rivet rivet-br" />
+
         {/* Header Ribbon */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
           <div>
@@ -251,20 +317,22 @@ export default function HostView({ onBack }) {
           </div>
 
           {/* Stamped Room Ticket */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div className="paper-badge">
-              <span>SESSION:</span>
-              <strong style={{ letterSpacing: '2px' }}>{roomId}</strong>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <div className="paper-badge" title="Room Code">
+              <span>ROOM:</span>
+              <strong style={{ letterSpacing: '1.5px', color: 'var(--amber-bright)' }}>
+                {roomId.replace('SESSION-', '#')}
+              </strong>
             </div>
 
             <button onClick={() => setShowQrModal(true)} className="btn-analog" title="Show QR Code">
               <QrCode size={16} />
-              QR Code
+              <span>QR Code</span>
             </button>
 
             <button onClick={copyShareLink} className="btn-analog">
               {copied ? <Check size={16} color="var(--amber-bright)" /> : <Copy size={16} />}
-              {copied ? 'Copied' : 'Share'}
+              <span>{copied ? 'Copied' : 'Share'}</span>
             </button>
           </div>
         </div>
@@ -275,7 +343,7 @@ export default function HostView({ onBack }) {
             SELECT INPUT CHANNEL:
           </span>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' }}>
+          <div className="input-channels-grid">
             <button 
               onClick={() => { setSourceType('screen'); startScreenCapture(); }}
               className={`btn-analog ${sourceType === 'screen' && isBroadcasting ? 'btn-amber' : ''}`}
@@ -370,7 +438,13 @@ export default function HostView({ onBack }) {
       </div>
 
       {/* Connected Satellite Soundboard Strip */}
-      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
+        {/* Chassis Corner Rivets */}
+        <div className="corner-rivet rivet-tl" />
+        <div className="corner-rivet rivet-tr" />
+        <div className="corner-rivet rivet-bl" />
+        <div className="corner-rivet rivet-br" />
+
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
           <div>
             <h2 className="font-serif" style={{ fontSize: '18px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
