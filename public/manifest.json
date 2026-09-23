@@ -1,0 +1,17 @@
+{
+  "name": "PartySync — Multi-Device Audio Mesh",
+  "short_name": "PartySync",
+  "description": "Sync movies, Spotify, and music in lockstep across phones, laptops, and speakers",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d16",
+  "theme_color": "#00f5ff",
+  "icons": [
+    {
+      "src": "https://img.icons8.com/neon/512/audio-wave.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
