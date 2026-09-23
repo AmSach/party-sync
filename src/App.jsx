@@ -3,6 +3,7 @@ import { Radio, Speaker, Tv, Download, Disc3, Sparkles } from 'lucide-react';
 import HeroCard from './components/HeroCard';
 import HostView from './components/HostView';
 import ReceiverView from './components/ReceiverView';
+import MotionBackground from './components/MotionBackground';
 
 export default function App() {
   const [mode, setMode] = useState('host'); // Default directly into a working console, no split tab landing screen!
@@ -39,8 +40,10 @@ export default function App() {
       display: 'flex', 
       flexDirection: 'column', 
       position: 'relative',
-      background: 'radial-gradient(ellipse at 50% 10%, #1a2838 0%, #0f1419 75%)'
+      background: '#0f1419'
     }}>
+      {/* Motion.dev Hardware-Accelerated Acoustic Background */}
+      <MotionBackground />
       
       {/* Main Console Container */}
       <div style={{ position: 'relative', zIndex: 10, display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
