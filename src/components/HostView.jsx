@@ -17,6 +17,7 @@ export default function HostView({ onBack }) {
   const [lipSyncDelay, setLipSyncDelay] = useState(0);
   const [activeMediaTitle, setActiveMediaTitle] = useState('No audio source selected');
   const [showQrModal, setShowQrModal] = useState(false);
+  const [showAudioMissingHelp, setShowAudioMissingHelp] = useState(false);
 
   const peerRef = useRef(null);
   const audioStreamRef = useRef(null);
@@ -123,23 +124,30 @@ export default function HostView({ onBack }) {
   const startScreenCapture = async () => {
     try {
       const mediaStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+        video: {
+          displaySurface: 'browser'
+        },
         audio: {
+          suppressLocalAudioPlayback: false,
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: 48000
-        }
+          autoGainControl: false
+        },
+        systemAudio: 'include',
+        surfaceSwitching: 'include'
       });
 
       const audioTracks = mediaStream.getAudioTracks();
       if (audioTracks.length === 0) {
-        alert("⚠️ Audio track missing. Please ensure 'Share audio' is checked when selecting your screen or tab.");
         mediaStream.getTracks().forEach(t => t.stop());
+        setShowAudioMissingHelp(true);
         return;
       }
 
-      setActiveMediaTitle(mediaStream.getVideoTracks()[0]?.label || "Desktop / Movie Audio Loopback");
+      setShowAudioMissingHelp(false);
+      const title = mediaStream.getVideoTracks()[0]?.label || "Desktop / Movie Audio Loopback";
+      setActiveMediaTitle(title);
+      activeMediaTitleRef.current = title;
       setupHostAudio(mediaStream);
     } catch (err) {
       console.error("[Host] Screen capture error:", err);
@@ -569,6 +577,92 @@ export default function HostView({ onBack }) {
             <button onClick={() => setShowQrModal(false)} className="btn-analog btn-amber" style={{ marginTop: '8px' }}>
               Close Deck
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Audio Track Missing Guide Modal */}
+      {showAudioMissingHelp && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          background: 'rgba(0,0,0,0.88)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 110,
+          padding: '16px'
+        }}>
+          <div className="analog-deck" style={{ maxWidth: '440px', width: '100%', padding: '28px', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
+            <div className="corner-rivet rivet-tl" />
+            <div className="corner-rivet rivet-tr" />
+            <div className="corner-rivet rivet-bl" />
+            <div className="corner-rivet rivet-br" />
+
+            <div>
+              <span className="paper-badge" style={{ fontSize: '11px', color: 'var(--amber-bright)', marginBottom: '8px' }}>
+                ⚠️ AUDIO PERMISSION REQUIRED
+              </span>
+              <h3 className="font-serif" style={{ fontSize: '22px', fontWeight: '800', color: 'var(--text-cream)', marginTop: '4px' }}>
+                How to Pick Up Audio in Chrome
+              </h3>
+              <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px', lineHeight: '1.5' }}>
+                Chrome blocked audio because the audio toggle wasn't turned on in the browser popup:
+              </p>
+            </div>
+
+            {/* Visual 3-Step Guide */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: '#100f0d', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-deck)' }}>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>1</span>
+                <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                  <strong>Select "Chrome Tab"</strong> (at the top of the popup) and click your Spotify Web, YouTube, or Netflix tab.
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>2</span>
+                <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                  <strong>Turn ON "Also share tab audio"</strong> at the bottom-left corner of the Chrome dialog.
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>3</span>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  <em>Using Desktop Spotify App?</em> Choose <strong>"Entire Screen"</strong> and check <strong>"Share system audio"</strong>. (Chrome does NOT support audio from the "Window" tab).
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button 
+                onClick={() => { setShowAudioMissingHelp(false); startScreenCapture(); }} 
+                className="btn-analog btn-amber" 
+                style={{ flex: 1, padding: '12px', fontSize: '13px' }}
+              >
+                🔄 Try Again (Open Popup)
+              </button>
+
+              <button 
+                onClick={() => { setShowAudioMissingHelp(false); setSourceType('synth'); startSynthGenerator(); }} 
+                className="btn-analog" 
+                style={{ padding: '12px', fontSize: '13px' }}
+              >
+                ⚡ Test Synth Groove
+              </button>
+
+              <button 
+                onClick={() => setShowAudioMissingHelp(false)} 
+                className="btn-analog" 
+                style={{ padding: '12px', fontSize: '13px' }}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
