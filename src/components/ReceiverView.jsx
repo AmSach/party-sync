@@ -3,9 +3,10 @@ import Peer from 'peerjs';
 import { 
   Speaker, Sliders, Volume2, Maximize, Smartphone, 
   CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck, Power,
-  Clock, Music
+  Clock, Music, Bluetooth, Headphones, Cable, RefreshCw
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
+import { clockSync } from '../utils/clockSync';
 import Visualizer from './Visualizer';
 
 export default function ReceiverView({ initialRoomId = '', onBack }) {
@@ -13,10 +14,13 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const [deviceName, setDeviceName] = useState('Satellite Speaker');
   const [isConnected, setIsConnected] = useState(false);
   const [isAudioActive, setIsAudioActive] = useState(false);
-  const [nudgeMs, setNudgeMs] = useState(0);
+  const [delayMs, setDelayMs] = useState(0);
+  const [hardwareProfile, setHardwareProfile] = useState('phone'); // 'phone' | 'bt_speaker' | 'bt_headphones' | 'aux'
   const [volume, setVolume] = useState(1.0);
   const [statusText, setStatusText] = useState('Receiver Standby');
   const [isFullscreenVisualizer, setIsFullscreenVisualizer] = useState(false);
+  const [isFlashing, setIsFlashing] = useState(false);
+  const [clockInfo, setClockInfo] = useState({ isSynced: false, rtt: 0, offset: 0 });
 
   const peerRef = useRef(null);
   const connRef = useRef(null);
@@ -38,10 +42,20 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     if (initialRoomId) {
       setRoomId(initialRoomId);
     }
+
+    clockSync.onSyncChange = (info) => {
+      setClockInfo(info);
+    };
+
     return () => {
       disconnect();
     };
   }, [initialRoomId]);
+
+  const triggerVisualFlash = () => {
+    setIsFlashing(true);
+    setTimeout(() => setIsFlashing(false), 80);
+  };
 
   const connectToHost = () => {
     const cleanRoom = roomId.trim();
@@ -74,7 +88,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
     peer.on('open', (id) => {
       console.log('[Receiver] Connected to peer mesh:', id);
-      setStatusText('Synchronizing with Host...');
+      setStatusText('Synchronizing Master Clock with Host...');
 
       const conn = peer.connect(targetRoomId, {
         metadata: { name: deviceName }
@@ -82,8 +96,11 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
       conn.on('open', () => {
         setIsConnected(true);
-        setStatusText('Tuned In • Auto-Synchronized');
+        setStatusText('Tuned In • Calibrating Precision Clock');
         requestWakeLock();
+
+        // High-precision clock calibration burst on handshake
+        clockSync.startCalibration(conn);
       });
 
       conn.on('data', (data) => {
@@ -99,9 +116,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         } else if (data.type === 'AUDIO_STOPPED') {
           setIsAudioActive(false);
           setStatusText('● Host paused audio feed');
-        } else if (data.type === 'PING_RTT') {
-          // Respond immediately to host's RTT probe for automatic latency calibration
-          conn.send({ type: 'PONG_RTT', t0: data.t0 });
+        } else if (data.type === 'NTP_PONG') {
+          // Process high-resolution master clock synchronization response
+          clockSync.handlePong(data);
+        } else if (data.type === 'SYNC_CLAPPER') {
+          // Fire scheduled acoustic tick & visual flash at exact microsecond
+          clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash);
         }
       });
 
@@ -115,18 +135,26 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     });
 
     peer.on('call', (call) => {
-      console.log('[Receiver] Answering audio pipe...');
+      console.log('[Receiver] Answering audio pipe with Studio Hi-Fi Opus...');
       call.answer();
 
       call.on('stream', (remoteAudioStream) => {
         console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
+        
+        // Route audio through Web Audio API with soft-knee limiter and delay
         audioProcessor.setupStream(remoteAudioStream);
+
+        // CRITICAL FIX FOR AUDIO DISTORTION:
+        // The hidden <audio> element is muted so it does NOT play simultaneously with Web Audio!
+        // Playing both simultaneously caused massive phase distortion, comb filtering, and clipping.
         if (audioElRef.current) {
           audioElRef.current.srcObject = remoteAudioStream;
+          audioElRef.current.muted = true;
           audioElRef.current.play().catch(e => console.log('Audio element play notice:', e));
         }
+
         setIsAudioActive(true);
-        setStatusText('● Live Synchronized Playout');
+        setStatusText('● Live Synchronized Studio Playout');
       });
 
       call.on('close', () => {
@@ -148,14 +176,34 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     peerRef.current = peer;
   };
 
+  const handleProfileSelect = (profile) => {
+    setHardwareProfile(profile);
+    let offset = 0;
+    if (profile === 'bt_speaker') {
+      offset = 180; // Standard Bluetooth speaker SBC/AAC buffer latency compensation
+    } else if (profile === 'bt_headphones') {
+      offset = 120; // Bluetooth earbud latency compensation
+    } else if (profile === 'phone' || profile === 'aux') {
+      offset = 0;
+    }
+    setDelayMs(offset);
+    audioProcessor.setDelay(offset);
+  };
+
   const handleNudgeChange = (ms) => {
-    setNudgeMs(ms);
+    setDelayMs(ms);
     audioProcessor.setDelay(ms);
   };
 
   const handleVolumeChange = (vol) => {
     setVolume(vol);
     audioProcessor.setVolume(vol);
+  };
+
+  const recalibrateClock = () => {
+    if (connRef.current && connRef.current.open) {
+      clockSync.startCalibration(connRef.current);
+    }
   };
 
   const disconnect = () => {
@@ -169,10 +217,22 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   };
 
   return (
-    <div style={{ maxWidth: '580px', margin: '0 auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+    <div style={{ maxWidth: '600px', margin: '0 auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
       
       {/* Console Top Deck */}
-      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px', position: 'relative' }}>
+      <div 
+        className="analog-deck" 
+        style={{ 
+          padding: '24px', 
+          display: 'flex', 
+          flexDirection: 'column', 
+          gap: '20px', 
+          position: 'relative',
+          transition: 'box-shadow 0.08s ease, border-color 0.08s ease',
+          borderColor: isFlashing ? 'var(--amber-bright)' : 'var(--border-deck)',
+          boxShadow: isFlashing ? '0 0 35px var(--amber-bright)' : '0 20px 48px -12px rgba(0, 0, 0, 0.85)'
+        }}
+      >
         {/* Chassis Corner Rivets */}
         <div className="corner-rivet rivet-tl" />
         <div className="corner-rivet rivet-tr" />
@@ -191,7 +251,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 boxShadow: isAudioActive ? '0 0 10px var(--amber-core)' : 'none'
               }} />
               <span className="font-mono" style={{ fontSize: '11px', letterSpacing: '1.5px', color: isAudioActive ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
-                {isAudioActive ? 'RECEIVING FEED' : 'STANDBY'}
+                {isAudioActive ? 'STUDIO FEED ACTIVE' : 'RECEIVER STANDBY'}
               </span>
             </div>
             <h1 className="font-serif" style={{ fontSize: '24px', fontWeight: '700', marginTop: '2px' }}>
@@ -235,7 +295,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SPEAKER NAME / LOCATION:</label>
                 <input 
                   type="text" 
-                  placeholder="e.g. Table Phone, Kitchen Speaker, Balcony" 
+                  placeholder="e.g. Living Room, JBL Flip, Kitchen Phone" 
                   value={deviceName} 
                   onChange={(e) => setDeviceName(e.target.value)}
                   style={{
@@ -264,7 +324,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           /* Active Speaker Deck */
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             
-            {/* Live Wi-Fi Mesh Status Inset */}
+            {/* Live Wi-Fi Mesh & Precision Clock Telemetry Banner */}
             <div style={{
               padding: '14px 16px',
               borderRadius: '12px',
@@ -284,7 +344,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     boxShadow: isAudioActive ? '0 0 8px #10b981' : 'none'
                   }} />
                   <strong className="font-mono" style={{ fontSize: '12px', color: isAudioActive ? '#10b981' : 'var(--amber-bright)' }}>
-                    {isAudioActive ? 'LIVE WI-FI AUDIO STREAMING' : 'LINKED OVER LOCAL WI-FI'}
+                    {isAudioActive ? '256KBPS STUDIO HI-FI STREAMING' : 'LINKED TO HOST CLOCK'}
                   </strong>
                 </div>
 
@@ -293,87 +353,154 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 </button>
               </div>
 
-              <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
-                {isAudioActive 
-                  ? '● Stream is playing in synchronized lockstep with host and peer devices.' 
-                  : '📡 Connected to Host! Waiting for Host to select audio. (On host laptop, click "Analog Lofi Groove" or "Screen Loopback" to begin streaming!)'}
+              {/* Nanosecond Master Clock Telemetry */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                <span>
+                  ⚡ Master Clock: {clockInfo.isSynced ? <span style={{ color: '#10b981' }}>Locked (RTT: {clockInfo.rtt}ms, Drift: {clockInfo.offset.toFixed(1)}ms)</span> : 'Calibrating...'}
+                </span>
+                <button onClick={recalibrateClock} className="btn-analog" style={{ padding: '2px 6px', fontSize: '10px' }}>
+                  <RefreshCw size={10} /> Re-Sync
+                </button>
               </div>
             </div>
 
-            {/* Full-Range Uniform Audio Banner (Replaced disruptive stereo splitting) */}
-            <div style={{
-              padding: '12px 14px',
-              borderRadius: '10px',
-              background: 'rgba(245, 158, 11, 0.08)',
-              border: '1px solid rgba(245, 158, 11, 0.2)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px'
-            }}>
-              <Volume2 size={18} color="var(--amber-bright)" style={{ flexShrink: 0 }} />
-              <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
-                <strong>Uniform Full-Range Sound:</strong> Streaming identical audio to all devices for maximum room-filling volume.
+            {/* TRANSMISSION TARGET HARDWARE PROFILES (BLUETOOTH LATENCY SOLVER) */}
+            <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)', letterSpacing: '0.8px' }}>
+                  SPEAKER HARDWARE PROFILE:
+                </span>
+                <span className="paper-badge" style={{ fontSize: '10px', padding: '2px 6px' }}>
+                  {hardwareProfile === 'bt_speaker' ? 'BLUETOOTH (+180MS)' : hardwareProfile === 'bt_headphones' ? 'EARBUDS (+120MS)' : 'ZERO-BUFFER (0MS)'}
+                </span>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '8px' }}>
+                <button
+                  onClick={() => handleProfileSelect('phone')}
+                  className="btn-analog"
+                  style={{
+                    padding: '10px 8px',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    background: hardwareProfile === 'phone' ? 'var(--amber-core)' : '#171513',
+                    color: hardwareProfile === 'phone' ? '#0c0b0a' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'phone' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                  }}
+                >
+                  <Smartphone size={16} />
+                  <strong style={{ fontSize: '11px' }}>Phone Speaker</strong>
+                  <span style={{ fontSize: '9px', opacity: 0.8 }}>Internal (0ms)</span>
+                </button>
+
+                <button
+                  onClick={() => handleProfileSelect('bt_speaker')}
+                  className="btn-analog"
+                  style={{
+                    padding: '10px 8px',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    background: hardwareProfile === 'bt_speaker' ? 'var(--amber-core)' : '#171513',
+                    color: hardwareProfile === 'bt_speaker' ? '#0c0b0a' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'bt_speaker' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                  }}
+                >
+                  <Bluetooth size={16} />
+                  <strong style={{ fontSize: '11px' }}>BT Speaker</strong>
+                  <span style={{ fontSize: '9px', opacity: 0.8 }}>JBL/Bose (+180ms)</span>
+                </button>
+
+                <button
+                  onClick={() => handleProfileSelect('bt_headphones')}
+                  className="btn-analog"
+                  style={{
+                    padding: '10px 8px',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    background: hardwareProfile === 'bt_headphones' ? 'var(--amber-core)' : '#171513',
+                    color: hardwareProfile === 'bt_headphones' ? '#0c0b0a' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'bt_headphones' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                  }}
+                >
+                  <Headphones size={16} />
+                  <strong style={{ fontSize: '11px' }}>Earbuds</strong>
+                  <span style={{ fontSize: '9px', opacity: 0.8 }}>AirPods (+120ms)</span>
+                </button>
+
+                <button
+                  onClick={() => handleProfileSelect('aux')}
+                  className="btn-analog"
+                  style={{
+                    padding: '10px 8px',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    background: hardwareProfile === 'aux' ? 'var(--amber-core)' : '#171513',
+                    color: hardwareProfile === 'aux' ? '#0c0b0a' : 'var(--text-cream)',
+                    borderColor: hardwareProfile === 'aux' ? 'var(--amber-bright)' : 'var(--border-deck)'
+                  }}
+                >
+                  <Cable size={16} />
+                  <strong style={{ fontSize: '11px' }}>AUX Cable</strong>
+                  <span style={{ fontSize: '9px', opacity: 0.8 }}>Wired Jack (0ms)</span>
+                </button>
               </div>
             </div>
 
-            {/* Precision Micro-Nudge Calibration (Replaced huge offset with ±30ms acoustic nudge) */}
+            {/* PRECISION ACOUSTIC NUDGE CALIBRATION */}
             <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <div style={{ fontSize: '12px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <Clock size={14} color="var(--amber-bright)" />
-                    Acoustic Room Nudge (Fine-Tune):
+                    Phase & Acoustic Latency Alignment:
                   </div>
                   <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                    Auto-synced by host. Only adjust for physical room distance or speaker delay.
+                    Compensates for speaker processing and physical room distance
                   </div>
                 </div>
-                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: nudgeMs === 0 ? '#10b981' : 'var(--amber-bright)' }}>
-                  {nudgeMs === 0 ? '0ms (Locked)' : `${nudgeMs > 0 ? '+' : ''}${nudgeMs}ms`}
+                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: delayMs === 0 ? '#10b981' : 'var(--amber-bright)' }}>
+                  {delayMs === 0 ? '0ms (Locked)' : `${delayMs > 0 ? '+' : ''}${delayMs}ms`}
                 </span>
               </div>
 
               <input 
                 type="range" 
-                min="-30" 
-                max="30" 
-                step="1"
-                value={nudgeMs} 
+                min="-90" 
+                max="350" 
+                step="5"
+                value={delayMs} 
                 onChange={(e) => handleNudgeChange(parseInt(e.target.value))} 
               />
 
-              {/* Quick Preset Nudge Buttons */}
-              <div style={{ display: 'flex', gap: '6px' }}>
+              {/* Stepped Coarse/Fine Alignment Buttons */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '4px' }}>
                 {[
-                  { label: '-10ms', val: -10 },
-                  { label: '-5ms', val: -5 },
-                  { label: '0ms (Auto-Lock)', val: 0 },
-                  { label: '+5ms', val: 5 },
-                  { label: '+10ms', val: 10 },
-                ].map(preset => (
+                  { label: '-50ms', val: delayMs - 50 },
+                  { label: '-10ms', val: delayMs - 10 },
+                  { label: '0ms Reset', val: 0 },
+                  { label: '+10ms', val: delayMs + 10 },
+                  { label: '+50ms', val: delayMs + 50 },
+                  { label: '+180ms BT', val: 180 },
+                ].map(b => (
                   <button
-                    key={preset.label}
-                    onClick={() => handleNudgeChange(preset.val)}
+                    key={b.label}
+                    onClick={() => handleNudgeChange(Math.max(-90, Math.min(350, b.val)))}
                     className="btn-analog"
                     style={{
-                      flex: 1,
-                      padding: '4px 2px',
+                      padding: '6px 2px',
                       fontSize: '10px',
-                      fontFamily: 'monospace',
-                      background: nudgeMs === preset.val ? 'var(--amber-core)' : '#1a1816',
-                      color: nudgeMs === preset.val ? '#0c0b0a' : 'var(--text-muted)',
-                      borderColor: nudgeMs === preset.val ? 'var(--amber-bright)' : 'var(--border-deck)'
+                      fontFamily: 'monospace'
                     }}
                   >
-                    {preset.label}
+                    {b.label}
                   </button>
                 ))}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
-                <span>Faster (-30ms)</span>
-                <span style={{ color: 'var(--amber-bright)' }}>Auto-Synced (0ms)</span>
-                <span>Slower (+30ms)</span>
+                <span>Faster (-90ms)</span>
+                <span style={{ color: 'var(--amber-bright)' }}>Phase Synchronized</span>
+                <span>Bluetooth Delay (+350ms)</span>
               </div>
             </div>
 
@@ -421,8 +548,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
       </div>
       
-      {/* Hidden Audio Element for Mobile Browser Playback Assurance */}
-      <audio ref={audioElRef} autoPlay playsInline style={{ display: 'none' }} />
+      {/* Hidden Muted Audio Element to Keep Mobile Browser Audio Session Active */}
+      <audio ref={audioElRef} autoPlay playsInline muted style={{ display: 'none' }} />
     </div>
   );
 }

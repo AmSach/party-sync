@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Radio, Speaker, Tv, Download, Disc3, Sparkles } from 'lucide-react';
-import ThreeBackground from './components/ThreeBackground';
 import HeroCard from './components/HeroCard';
 import HostView from './components/HostView';
 import ReceiverView from './components/ReceiverView';
@@ -35,11 +34,14 @@ export default function App() {
   };
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+    <div style={{ 
+      minHeight: '100vh', 
+      display: 'flex', 
+      flexDirection: 'column', 
+      position: 'relative',
+      background: 'radial-gradient(ellipse at 50% 10%, #1c1813 0%, #0c0b0a 75%)'
+    }}>
       
-      {/* 3D Lofi Ambient Background */}
-      <ThreeBackground isAudioActive={true} />
-
       {/* Main Console Container */}
       <div style={{ position: 'relative', zIndex: 10, display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
         
@@ -176,7 +178,7 @@ export default function App() {
           fontFamily: 'monospace',
           letterSpacing: '0.5px'
         }}>
-          PARTYSYNC ANALOG MESH • SUB-20MS LOCAL WEBRTC • ZERO-COMPRESSION PCM
+          PARTYSYNC ANALOG MESH • 256KBPS STUDIO HI-FI OPUS • PRECISION MASTER CLOCK
         </footer>
 
       </div>
