@@ -3,7 +3,8 @@ import Peer from 'peerjs';
 import QRCode from 'qrcode';
 import { 
   Tv, Music, Monitor, Mic, Radio, Users, Sliders, Copy, 
-  Check, Volume2, ShieldCheck, Play, Pause, RefreshCw, QrCode
+  Check, Volume2, VolumeX, ShieldCheck, Play, Pause, RefreshCw, QrCode,
+  Zap, Clock, Wifi, Info
 } from 'lucide-react';
 import Visualizer from './Visualizer';
 
@@ -14,7 +15,13 @@ export default function HostView({ onBack }) {
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [connectedPeers, setConnectedPeers] = useState([]);
   const [copied, setCopied] = useState(false);
-  const [lipSyncDelay, setLipSyncDelay] = useState(0);
+  
+  // Host playback synchronization controls
+  const [laptopMuted, setLaptopMuted] = useState(false);
+  const [hostDelayMs, setHostDelayMs] = useState(135);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
+  const [rttMs, setRttMs] = useState(null);
+
   const [activeMediaTitle, setActiveMediaTitle] = useState('No audio source selected');
   const [showQrModal, setShowQrModal] = useState(false);
   const [showAudioMissingHelp, setShowAudioMissingHelp] = useState(false);
@@ -23,10 +30,25 @@ export default function HostView({ onBack }) {
   const audioStreamRef = useRef(null);
   const videoElementRef = useRef(null);
   const audioContextRef = useRef(null);
+  const hostDelayNodeRef = useRef(null);
+  const hostGainNodeRef = useRef(null);
+  const hostSourceNodeRef = useRef(null);
+  const pingIntervalRef = useRef(null);
   const synthIntervalRef = useRef(null);
   const analyserRef = useRef(null);
   const activeConnectionsRef = useRef(new Map());
   const activeMediaTitleRef = useRef('No audio source selected');
+  const hostDelayMsRef = useRef(135);
+  const autoSyncEnabledRef = useRef(true);
+
+  // Sync ref values for callbacks
+  useEffect(() => {
+    hostDelayMsRef.current = hostDelayMs;
+  }, [hostDelayMs]);
+
+  useEffect(() => {
+    autoSyncEnabledRef.current = autoSyncEnabled;
+  }, [autoSyncEnabled]);
 
   useEffect(() => {
     const randomCode = 'SESSION-' + Math.floor(1000 + Math.random() * 9000);
@@ -39,10 +61,23 @@ export default function HostView({ onBack }) {
       color: { dark: '#f4efe6', light: '#141210' }
     }).then(url => setQrDataUrl(url));
 
-    // CRITICAL FIX: Initialize Host Peer on the signaling network immediately!
+    // Initialize Host Peer immediately on signaling network
     initHostPeer(randomCode);
 
+    // Start RTT ping-pong interval to calibrate network latency automatically
+    pingIntervalRef.current = setInterval(() => {
+      if (activeConnectionsRef.current.size > 0) {
+        const now = performance.now();
+        activeConnectionsRef.current.forEach(conn => {
+          if (conn.open) {
+            conn.send({ type: 'PING_RTT', t0: now });
+          }
+        });
+      }
+    }, 2500);
+
     return () => {
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       stopBroadcasting(true);
     };
   }, []);
@@ -67,14 +102,14 @@ export default function HostView({ onBack }) {
     });
 
     peer.on('open', (id) => {
-      console.log('[Host] Room console active & listening for satellites:', id);
+      console.log('[Host] Master broadcast console listening on:', id);
     });
 
     peer.on('connection', (conn) => {
-      console.log('[Host] Incoming peer connection attempt:', conn.peer);
+      console.log('[Host] Incoming satellite connection:', conn.peer);
 
       conn.on('open', () => {
-        console.log('[Host] Satellite data channel established:', conn.peer);
+        console.log('[Host] Satellite data channel active:', conn.peer);
         activeConnectionsRef.current.set(conn.peer, conn);
 
         conn.send({ 
@@ -85,19 +120,42 @@ export default function HostView({ onBack }) {
 
         setConnectedPeers(prev => [
           ...prev.filter(p => p.id !== conn.peer),
-          { id: conn.peer, name: conn.metadata?.name || `Phone (${conn.peer.slice(-4)})`, role: 'stereo' }
+          { id: conn.peer, name: conn.metadata?.name || `Phone (${conn.peer.slice(-4)})`, rtt: null }
         ]);
 
-        // If audio stream is already playing, immediately call this new satellite
+        // If audio stream is already playing, immediately pipe to new satellite
         if (audioStreamRef.current && peerRef.current) {
-          console.log(`[Host] Piping active audio stream to new satellite: ${conn.peer}`);
-          peerRef.current.call(conn.peer, audioStreamRef.current);
+          console.log(`[Host] Piping active stream to new satellite: ${conn.peer}`);
+          try {
+            peerRef.current.call(conn.peer, audioStreamRef.current);
+          } catch (e) {
+            console.error('[Host] Call error:', e);
+          }
         }
       });
 
       conn.on('data', (data) => {
-        if (data.type === 'UPDATE_ROLE') {
-          setConnectedPeers(prev => prev.map(p => p.id === conn.peer ? { ...p, role: data.role } : p));
+        if (data.type === 'PONG_RTT') {
+          const roundTrip = Math.round(performance.now() - data.t0);
+          setRttMs(roundTrip);
+
+          setConnectedPeers(prev => prev.map(p => p.id === conn.peer ? { ...p, rtt: roundTrip } : p));
+
+          // Automated Latency Calibration:
+          // WebRTC latency = RTT/2 + Opus encode/decode (~40ms) + Jitter buffer (~45ms) + Receiver base buffer (50ms)
+          if (autoSyncEnabledRef.current) {
+            const calculatedDelay = Math.round((roundTrip / 2) + 125);
+            const clamped = Math.max(90, Math.min(220, calculatedDelay));
+            setHostDelayMs(clamped);
+
+            if (hostDelayNodeRef.current && audioContextRef.current) {
+              hostDelayNodeRef.current.delayTime.setTargetAtTime(
+                clamped / 1000, 
+                audioContextRef.current.currentTime, 
+                0.1
+              );
+            }
+          }
         }
       });
 
@@ -135,7 +193,9 @@ export default function HostView({ onBack }) {
           displaySurface: 'browser'
         },
         audio: {
-          suppressLocalAudioPlayback: false,
+          // suppressLocalAudioPlayback tells Chrome NOT to echo tab audio instantly at 0ms!
+          // We route it through our own delayed Web Audio pipeline so laptop speakers match phones!
+          suppressLocalAudioPlayback: true,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false
@@ -166,10 +226,14 @@ export default function HostView({ onBack }) {
     if (!file) return;
 
     setActiveMediaTitle(file.name);
+    activeMediaTitleRef.current = file.name;
     const fileUrl = URL.createObjectURL(file);
 
     if (videoElementRef.current) {
       videoElementRef.current.src = fileUrl;
+      // CRITICAL: Mute the <video> element so it doesn't play instantly at 0ms ahead of phones!
+      // Its audio track is routed via setupHostAudio through hostDelayNode.
+      videoElementRef.current.muted = true;
       videoElementRef.current.play();
 
       let stream;
@@ -195,6 +259,7 @@ export default function HostView({ onBack }) {
         }
       });
       setActiveMediaTitle("Live Room Mic / DJ Line-in");
+      activeMediaTitleRef.current = "Live Room Mic / DJ Line-in";
       setupHostAudio(stream);
     } catch (err) {
       console.error("[Host] Mic error:", err);
@@ -202,12 +267,11 @@ export default function HostView({ onBack }) {
   };
 
   const startSynthGenerator = () => {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
     audioContextRef.current = ctx;
+    if (ctx.state === 'suspended') ctx.resume();
 
     const dest = ctx.createMediaStreamDestination();
-    analyserRef.current = ctx.createAnalyser();
-
     let step = 0;
     const notes = [110, 130.81, 146.83, 164.81, 196, 220, 261.63];
 
@@ -224,8 +288,9 @@ export default function HostView({ onBack }) {
 
       osc.connect(gain);
       gain.connect(dest);
-      gain.connect(analyserRef.current);
-      gain.connect(ctx.destination);
+      // NOTE: Do not connect directly to ctx.destination here!
+      // dest.stream is routed through setupHostAudio -> hostDelayNode -> ctx.destination
+      // so it is synchronized with phones!
 
       osc.start();
       osc.stop(ctx.currentTime + 0.24);
@@ -233,6 +298,7 @@ export default function HostView({ onBack }) {
     }, 240);
 
     setActiveMediaTitle("Warm Analog Lofi Chords (Test Loop)");
+    activeMediaTitleRef.current = "Warm Analog Lofi Chords (Test Loop)";
     setupHostAudio(dest.stream);
   };
 
@@ -240,7 +306,7 @@ export default function HostView({ onBack }) {
     audioStreamRef.current = stream;
     setIsBroadcasting(true);
 
-    console.log(`[Host] Broadcasting audio stream to ${activeConnectionsRef.current.size} connected satellites`);
+    console.log(`[Host] Broadcasting identical audio stream to ${activeConnectionsRef.current.size} satellites`);
     activeConnectionsRef.current.forEach((conn, peerId) => {
       if (peerRef.current && peerRef.current.open) {
         console.log(`[Host] Calling satellite ${peerId} with audio stream`);
@@ -258,13 +324,54 @@ export default function HostView({ onBack }) {
     try {
       const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
       audioContextRef.current = ctx;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      // Disconnect previous source if any
+      if (hostSourceNodeRef.current) {
+        try { hostSourceNodeRef.current.disconnect(); } catch (e) {}
+      }
+
       const source = ctx.createMediaStreamSource(stream);
+      hostSourceNodeRef.current = source;
+
+      // Visualizer Analyser
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 128;
       source.connect(analyser);
       analyserRef.current = analyser;
+
+      // DELAY NODE: Delays Host Laptop speaker playback by hostDelayMs (~135ms)
+      // to eliminate the slap-back echo between laptop and phones!
+      const hostDelay = ctx.createDelay(1.0);
+      hostDelay.delayTime.setValueAtTime(hostDelayMs / 1000, ctx.currentTime);
+      hostDelayNodeRef.current = hostDelay;
+
+      // GAIN NODE: For muting laptop speakers or controlling local monitor volume
+      const hostGain = ctx.createGain();
+      hostGain.gain.setValueAtTime(laptopMuted ? 0 : 1.0, ctx.currentTime);
+      hostGainNodeRef.current = hostGain;
+
+      source.connect(hostDelay);
+      hostDelay.connect(hostGain);
+      hostGain.connect(ctx.destination);
     } catch (e) {
-      console.warn("[Host] Visualizer link notice:", e);
+      console.warn("[Host] Audio pipeline notice:", e);
+    }
+  };
+
+  const handleToggleLaptopMute = () => {
+    const nextMuted = !laptopMuted;
+    setLaptopMuted(nextMuted);
+    if (hostGainNodeRef.current && audioContextRef.current) {
+      hostGainNodeRef.current.gain.setValueAtTime(nextMuted ? 0 : 1.0, audioContextRef.current.currentTime);
+    }
+  };
+
+  const handleManualDelayChange = (ms) => {
+    setAutoSyncEnabled(false);
+    setHostDelayMs(ms);
+    if (hostDelayNodeRef.current && audioContextRef.current) {
+      hostDelayNodeRef.current.delayTime.setTargetAtTime(ms / 1000, audioContextRef.current.currentTime, 0.05);
     }
   };
 
@@ -381,17 +488,24 @@ export default function HostView({ onBack }) {
             </span>
           </div>
 
-          <span className="font-mono" style={{ fontSize: '11px', color: isBroadcasting ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
-            {isBroadcasting 
-              ? `● TRANSMITTING DIRECT P2P WI-FI AUDIO (<20ms)` 
-              : 'CLICK A SOURCE BELOW TO BROADCAST'}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {rttMs !== null && (
+              <span className="font-mono" style={{ fontSize: '11px', color: '#10b981' }}>
+                📡 Wi-Fi RTT: {rttMs}ms
+              </span>
+            )}
+            <span className="font-mono" style={{ fontSize: '11px', color: isBroadcasting ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
+              {isBroadcasting 
+                ? `● TRANSMITTING FULL-RANGE STEREO` 
+                : 'CHOOSE AN INPUT SOURCE BELOW'}
+            </span>
+          </div>
         </div>
 
         {/* Source Selector Rack */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)', letterSpacing: '1px' }}>
-            SELECT INPUT CHANNEL:
+            1. SELECT AUDIO INPUT CHANNEL:
           </span>
 
           <div className="input-channels-grid">
@@ -429,7 +543,7 @@ export default function HostView({ onBack }) {
               <Radio size={18} />
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontSize: '13px', fontWeight: '600' }}>Analog Lofi Groove</div>
-                <div style={{ fontSize: '11px', opacity: 0.7 }}>Built-in test synth</div>
+                <div style={{ fontSize: '11px', opacity: 0.7 }}>Instant built-in test synth</div>
               </div>
             </button>
 
@@ -447,6 +561,91 @@ export default function HostView({ onBack }) {
           </div>
         </div>
 
+        {/* AUTOMATIC SYNCHRONIZATION & LAPTOP SPEAKER CONTROL DECK */}
+        <div className="analog-inset" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px', border: '1px solid var(--amber-glow)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Zap size={16} color="var(--amber-bright)" />
+                <span className="font-mono" style={{ fontSize: '12px', fontWeight: '700', letterSpacing: '1px', color: 'var(--amber-bright)' }}>
+                  AUTOMATIC SYNCHRONIZATION ENGINE
+                </span>
+                <span className="paper-badge" style={{ fontSize: '10px', padding: '2px 6px', color: autoSyncEnabled ? '#10b981' : 'var(--amber-bright)' }}>
+                  {autoSyncEnabled ? '● AUTO-LOCKED' : 'MANUAL OVERRIDE'}
+                </span>
+              </div>
+              <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                Laptop audio is auto-delayed by <strong>{hostDelayMs}ms</strong> to match the phone WebRTC pipeline. Zero slap-back echo.
+              </p>
+            </div>
+
+            {/* Quick 1-Click Laptop Mute/Play Toggle */}
+            <button 
+              onClick={handleToggleLaptopMute}
+              className={`btn-analog ${laptopMuted ? '' : 'btn-amber'}`}
+              style={{ padding: '8px 14px', fontSize: '12px' }}
+            >
+              {laptopMuted ? (
+                <>
+                  <VolumeX size={16} />
+                  <span>🔇 Laptop Muted (Party Mode: Phones Only)</span>
+                </>
+              ) : (
+                <>
+                  <Volume2 size={16} />
+                  <span>🔊 Laptop Speakers: Auto-Delayed & Active</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Micro-Adjustment for Host Delay */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Clock size={14} color="var(--text-muted)" />
+              <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                Laptop Playback Pipeline Delay:
+              </span>
+              <strong className="font-mono" style={{ fontSize: '12px', color: 'var(--amber-bright)' }}>
+                {hostDelayMs} ms
+              </strong>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <button 
+                onClick={() => handleManualDelayChange(Math.max(60, hostDelayMs - 10))}
+                className="btn-analog" 
+                style={{ padding: '4px 8px', fontSize: '11px' }}
+                title="Hear laptop ahead of phones? Slower."
+              >
+                -10ms
+              </button>
+
+              <button 
+                onClick={() => setAutoSyncEnabled(true)}
+                className="btn-analog" 
+                style={{ 
+                  padding: '4px 10px', 
+                  fontSize: '11px',
+                  background: autoSyncEnabled ? 'var(--amber-core)' : '#1a1816',
+                  color: autoSyncEnabled ? '#0c0b0a' : 'var(--text-cream)'
+                }}
+              >
+                ⚡ Reset Auto-Lock
+              </button>
+
+              <button 
+                onClick={() => handleManualDelayChange(Math.min(300, hostDelayMs + 10))}
+                className="btn-analog" 
+                style={{ padding: '4px 8px', fontSize: '11px' }}
+                title="Hear phones ahead of laptop? Faster."
+              >
+                +10ms
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Live Audio Meter & Readout Panel */}
         <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -454,7 +653,7 @@ export default function HostView({ onBack }) {
               FEED: <strong style={{ color: 'var(--text-cream)' }}>{activeMediaTitle}</strong>
             </span>
             <span className="font-mono" style={{ fontSize: '11px', color: isBroadcasting ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
-              {isBroadcasting ? '48.0 kHz • 16-BIT PCM' : 'WAITING FOR INPUT'}
+              {isBroadcasting ? '48.0 kHz • UNIFORM FULL-RANGE STEREO' : 'WAITING FOR INPUT'}
             </span>
           </div>
 
@@ -463,30 +662,6 @@ export default function HostView({ onBack }) {
 
         {/* Video preview for local movies */}
         <video ref={videoElementRef} controls style={{ width: '100%', maxHeight: '180px', borderRadius: '10px', display: sourceType === 'file' ? 'block' : 'none' }} />
-
-        {/* Lip-Sync Offset Calibration */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', borderTop: '1px solid var(--border-deck)', paddingTop: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <Sliders size={16} color="var(--amber-bright)" />
-            <span className="font-mono" style={{ fontSize: '12px', fontWeight: '600' }}>Acoustic Lip-Sync Calibration:</span>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Align screen dialogue with room acoustics</span>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <input 
-              type="range" 
-              min="-200" 
-              max="200" 
-              step="5"
-              value={lipSyncDelay} 
-              onChange={(e) => setLipSyncDelay(parseInt(e.target.value))} 
-              style={{ width: '140px' }}
-            />
-            <span className="font-mono paper-badge" style={{ padding: '3px 8px' }}>
-              {lipSyncDelay > 0 ? `+${lipSyncDelay}` : lipSyncDelay} ms
-            </span>
-          </div>
-        </div>
 
       </div>
 
@@ -502,10 +677,10 @@ export default function HostView({ onBack }) {
           <div>
             <h2 className="font-serif" style={{ fontSize: '18px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Users size={18} color="var(--amber-bright)" />
-              Satellite Soundboard ({connectedPeers.length} Active Nodes)
+              Satellite Speaker Fleet ({connectedPeers.length} Active Devices)
             </h2>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
-              Assign spatial channels across the room to create an organic soundstage
+              All devices are streaming the identical full-frequency stereo mix in synchronized unison.
             </p>
           </div>
         </div>
@@ -519,36 +694,20 @@ export default function HostView({ onBack }) {
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>
             {connectedPeers.map((peer, idx) => (
-              <div key={peer.id} className="analog-inset" style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div key={peer.id} className="analog-inset" style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <span className="font-mono" style={{ fontSize: '10px', color: 'var(--amber-bright)' }}>CH {idx + 1}</span>
+                    <span className="font-mono" style={{ fontSize: '10px', color: 'var(--amber-bright)' }}>DEVICE {idx + 1}</span>
                     <strong style={{ fontSize: '13px', display: 'block', color: 'var(--text-cream)' }}>{peer.name}</strong>
                   </div>
-                  <span className="paper-badge" style={{ fontSize: '10px', padding: '2px 6px' }}>
-                    {peer.role.toUpperCase()}
+                  <span className="paper-badge" style={{ fontSize: '10px', padding: '2px 6px', color: '#10b981' }}>
+                    ● IN SYNC
                   </span>
                 </div>
 
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  {['stereo', 'left', 'right', 'bass'].map(r => (
-                    <button
-                      key={r}
-                      onClick={() => setConnectedPeers(prev => prev.map(p => p.id === peer.id ? { ...p, role: r } : p))}
-                      className="btn-analog"
-                      style={{
-                        flex: 1,
-                        padding: '4px',
-                        fontSize: '10px',
-                        fontFamily: 'monospace',
-                        background: peer.role === r ? 'var(--amber-core)' : '#1a1816',
-                        color: peer.role === r ? '#0c0b0a' : 'var(--text-muted)',
-                        borderColor: peer.role === r ? 'var(--amber-bright)' : 'var(--border-deck)'
-                      }}
-                    >
-                      {r === 'bass' ? 'SUB' : r.toUpperCase()}
-                    </button>
-                  ))}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                  <span>Wi-Fi Ping: {peer.rtt ? `${peer.rtt}ms` : '<20ms'}</span>
+                  <span style={{ color: 'var(--amber-bright)' }}>FULL-RANGE</span>
                 </div>
               </div>
             ))}

@@ -152,7 +152,7 @@ export default function HeroCard({ mode, setMode }) {
               <strong style={{ fontSize: '13px', color: 'var(--text-cream)' }}>Distribute & Party</strong>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.4', margin: 0 }}>
-              Scatter phones around the room. Assign Left, Right, or Subwoofer channels for immersive spatial audio.
+              Scatter phones around the room. All devices play full-range synchronized stereo for massive, room-filling sound.
             </p>
           </div>
         </div>

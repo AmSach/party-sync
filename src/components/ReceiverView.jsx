@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
   Speaker, Sliders, Volume2, Maximize, Smartphone, 
-  CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck, Power
+  CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck, Power,
+  Clock, Music
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
 import Visualizer from './Visualizer';
@@ -12,8 +13,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const [deviceName, setDeviceName] = useState('Satellite Speaker');
   const [isConnected, setIsConnected] = useState(false);
   const [isAudioActive, setIsAudioActive] = useState(false);
-  const [speakerRole, setSpeakerRole] = useState('stereo');
-  const [delayMs, setDelayMs] = useState(0);
+  const [nudgeMs, setNudgeMs] = useState(0);
   const [volume, setVolume] = useState(1.0);
   const [statusText, setStatusText] = useState('Receiver Standby');
   const [isFullscreenVisualizer, setIsFullscreenVisualizer] = useState(false);
@@ -82,7 +82,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
       conn.on('open', () => {
         setIsConnected(true);
-        setStatusText('Tuned In • Waiting for Audio Feed');
+        setStatusText('Tuned In • Auto-Synchronized');
         requestWakeLock();
       });
 
@@ -99,6 +99,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         } else if (data.type === 'AUDIO_STOPPED') {
           setIsAudioActive(false);
           setStatusText('● Host paused audio feed');
+        } else if (data.type === 'PING_RTT') {
+          // Respond immediately to host's RTT probe for automatic latency calibration
+          conn.send({ type: 'PONG_RTT', t0: data.t0 });
         }
       });
 
@@ -145,16 +148,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     peerRef.current = peer;
   };
 
-  const handleRoleChange = (newRole) => {
-    setSpeakerRole(newRole);
-    audioProcessor.applyRole(newRole);
-    if (connRef.current && connRef.current.open) {
-      connRef.current.send({ type: 'UPDATE_ROLE', role: newRole });
-    }
-  };
-
-  const handleDelayChange = (ms) => {
-    setDelayMs(ms);
+  const handleNudgeChange = (ms) => {
+    setNudgeMs(ms);
     audioProcessor.setDelay(ms);
   };
 
@@ -200,7 +195,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               </span>
             </div>
             <h1 className="font-serif" style={{ fontSize: '24px', fontWeight: '700', marginTop: '2px' }}>
-              Satellite Receiver
+              Satellite Speaker
             </h1>
           </div>
 
@@ -237,10 +232,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SPEAKER IDENTIFIER:</label>
+                <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SPEAKER NAME / LOCATION:</label>
                 <input 
                   type="text" 
-                  placeholder="e.g. Left Table, Car Stereo, Bedroom Phone" 
+                  placeholder="e.g. Table Phone, Kitchen Speaker, Balcony" 
                   value={deviceName} 
                   onChange={(e) => setDeviceName(e.target.value)}
                   style={{
@@ -300,83 +295,99 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
               <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
                 {isAudioActive 
-                  ? '● Audio is streaming directly device-to-device with sub-20ms synchronization.' 
+                  ? '● Stream is playing in synchronized lockstep with host and peer devices.' 
                   : '📡 Connected to Host! Waiting for Host to select audio. (On host laptop, click "Analog Lofi Groove" or "Screen Loopback" to begin streaming!)'}
               </div>
             </div>
 
-            {/* Spatial Role Pan */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                1. SPATIAL CHANNEL ASSIGNMENT:
-              </span>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
-                {[
-                  { id: 'stereo', label: 'ALL', desc: 'Stereo' },
-                  { id: 'left', label: 'LEFT', desc: 'L-Pan' },
-                  { id: 'right', label: 'RIGHT', desc: 'R-Pan' },
-                  { id: 'bass', label: 'SUB', desc: 'Bass' },
-                ].map(role => (
-                  <button
-                    key={role.id}
-                    onClick={() => handleRoleChange(role.id)}
-                    className="btn-analog"
-                    style={{
-                      padding: '10px 4px',
-                      flexDirection: 'column',
-                      gap: '2px',
-                      background: speakerRole === role.id ? 'var(--amber-core)' : '#1a1816',
-                      color: speakerRole === role.id ? '#0c0b0a' : 'var(--text-muted)',
-                      borderColor: speakerRole === role.id ? 'var(--amber-bright)' : 'var(--border-deck)'
-                    }}
-                  >
-                    <strong style={{ fontSize: '12px' }}>{role.label}</strong>
-                    <span style={{ fontSize: '9px', opacity: 0.7 }}>{role.desc}</span>
-                  </button>
-                ))}
+            {/* Full-Range Uniform Audio Banner (Replaced disruptive stereo splitting) */}
+            <div style={{
+              padding: '12px 14px',
+              borderRadius: '10px',
+              background: 'rgba(245, 158, 11, 0.08)',
+              border: '1px solid rgba(245, 158, 11, 0.2)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              <Volume2 size={18} color="var(--amber-bright)" style={{ flexShrink: 0 }} />
+              <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                <strong>Uniform Full-Range Sound:</strong> Streaming identical audio to all devices for maximum room-filling volume.
               </div>
             </div>
 
-            {/* Rotary-Style Latency Calibration */}
-            <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {/* Precision Micro-Nudge Calibration (Replaced huge offset with ±30ms acoustic nudge) */}
+            <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
-                  <div style={{ fontSize: '12px', fontWeight: '700' }}>2. Tape Head Alignment (Echo Offset):</div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Eliminates Bluetooth speaker internal processing lag</div>
+                  <div style={{ fontSize: '12px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Clock size={14} color="var(--amber-bright)" />
+                    Acoustic Room Nudge (Fine-Tune):
+                  </div>
+                  <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                    Auto-synced by host. Only adjust for physical room distance or speaker delay.
+                  </div>
                 </div>
-                <span className="font-mono paper-badge" style={{ padding: '2px 8px' }}>
-                  {delayMs > 0 ? `+${delayMs}` : delayMs} ms
+                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: nudgeMs === 0 ? '#10b981' : 'var(--amber-bright)' }}>
+                  {nudgeMs === 0 ? '0ms (Locked)' : `${nudgeMs > 0 ? '+' : ''}${nudgeMs}ms`}
                 </span>
               </div>
 
               <input 
                 type="range" 
-                min="-200" 
-                max="300" 
-                step="5"
-                value={delayMs} 
-                onChange={(e) => handleDelayChange(parseInt(e.target.value))} 
+                min="-30" 
+                max="30" 
+                step="1"
+                value={nudgeMs} 
+                onChange={(e) => handleNudgeChange(parseInt(e.target.value))} 
               />
 
+              {/* Quick Preset Nudge Buttons */}
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {[
+                  { label: '-10ms', val: -10 },
+                  { label: '-5ms', val: -5 },
+                  { label: '0ms (Auto-Lock)', val: 0 },
+                  { label: '+5ms', val: 5 },
+                  { label: '+10ms', val: 10 },
+                ].map(preset => (
+                  <button
+                    key={preset.label}
+                    onClick={() => handleNudgeChange(preset.val)}
+                    className="btn-analog"
+                    style={{
+                      flex: 1,
+                      padding: '4px 2px',
+                      fontSize: '10px',
+                      fontFamily: 'monospace',
+                      background: nudgeMs === preset.val ? 'var(--amber-core)' : '#1a1816',
+                      color: nudgeMs === preset.val ? '#0c0b0a' : 'var(--text-muted)',
+                      borderColor: nudgeMs === preset.val ? 'var(--amber-bright)' : 'var(--border-deck)'
+                    }}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
-                <span>Ahead (-200ms)</span>
-                <span>Lock (0ms)</span>
-                <span>Lag (+300ms)</span>
+                <span>Faster (-30ms)</span>
+                <span style={{ color: 'var(--amber-bright)' }}>Auto-Synced (0ms)</span>
+                <span>Slower (+30ms)</span>
               </div>
             </div>
 
             {/* Volume Potentiometer */}
             <div className="analog-inset" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>3. OUTPUT LEVEL:</span>
+                <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>OUTPUT LEVEL:</span>
                 <span className="font-mono" style={{ fontSize: '12px', color: 'var(--amber-bright)' }}>{Math.round(volume * 100)}%</span>
               </div>
               <input 
                 type="range" 
                 min="0" 
                 max="1.5" 
-                step="0.05"
+                step="0.05" 
                 value={volume} 
                 onChange={(e) => handleVolumeChange(parseFloat(e.target.value))} 
               />
