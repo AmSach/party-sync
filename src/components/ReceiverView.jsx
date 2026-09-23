@@ -2,27 +2,26 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
   Speaker, Sliders, Volume2, Maximize, Smartphone, 
-  CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck
+  CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck, Power
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
 import Visualizer from './Visualizer';
 
 export default function ReceiverView({ initialRoomId = '', onBack }) {
   const [roomId, setRoomId] = useState(initialRoomId);
-  const [deviceName, setDeviceName] = useState('My Satellite Speaker');
+  const [deviceName, setDeviceName] = useState('Satellite Speaker');
   const [isConnected, setIsConnected] = useState(false);
   const [isAudioActive, setIsAudioActive] = useState(false);
   const [speakerRole, setSpeakerRole] = useState('stereo');
   const [delayMs, setDelayMs] = useState(0);
   const [volume, setVolume] = useState(1.0);
-  const [statusText, setStatusText] = useState('Ready to link');
+  const [statusText, setStatusText] = useState('Receiver Standby');
   const [isFullscreenVisualizer, setIsFullscreenVisualizer] = useState(false);
 
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const wakeLockRef = useRef(null);
 
-  // Auto request screen wake lock so phone doesn't sleep during party
   const requestWakeLock = async () => {
     try {
       if ('wakeLock' in navigator) {
@@ -35,7 +34,6 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   };
 
   useEffect(() => {
-    // If URL has ?room=PARTY-xxxx, set it
     if (initialRoomId) {
       setRoomId(initialRoomId);
     }
@@ -46,14 +44,13 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
   const connectToHost = () => {
     if (!roomId) {
-      alert('Please enter a 4-digit Room Code!');
+      alert('Please enter a valid Session Code!');
       return;
     }
 
-    setStatusText('Connecting to Host...');
+    setStatusText('Tuning into session...');
     audioProcessor.init();
 
-    // Create random receiver peer
     const receiverPeerId = 'CLIENT-' + Math.random().toString(36).substring(2, 9);
     const peer = new Peer(receiverPeerId, {
       debug: 1,
@@ -66,56 +63,53 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     });
 
     peer.on('open', (id) => {
-      console.log('[Receiver] Peer opened:', id);
-      setStatusText('Linking to room ' + roomId + '...');
+      console.log('[Receiver] Connected to peer mesh:', id);
+      setStatusText('Synchronizing with Host...');
 
-      // Connect data channel to host
       const conn = peer.connect(roomId, {
         metadata: { name: deviceName }
       });
 
       conn.on('open', () => {
         setIsConnected(true);
-        setStatusText('Connected to Host! Waiting for audio stream...');
+        setStatusText('Tuned In • Waiting for Audio Feed');
         requestWakeLock();
       });
 
       conn.on('data', (data) => {
         if (data.type === 'WELCOME') {
-          console.log('[Receiver] Host active stream:', data.title);
+          console.log('[Receiver] Host media title:', data.title);
         }
       });
 
       conn.on('close', () => {
         setIsConnected(false);
         setIsAudioActive(false);
-        setStatusText('Host disconnected.');
+        setStatusText('Host Transmitter Offline');
       });
 
       connRef.current = conn;
     });
 
-    // Handle incoming audio call from Host
     peer.on('call', (call) => {
-      console.log('[Receiver] Incoming audio call from host...');
-      call.answer(); // Answer the call
+      console.log('[Receiver] Answering audio pipe...');
+      call.answer();
 
       call.on('stream', (remoteAudioStream) => {
-        console.log('[Receiver] Remote audio stream received!');
         audioProcessor.setupStream(remoteAudioStream);
         setIsAudioActive(true);
-        setStatusText('🔊 Live Audio Sync Active!');
+        setStatusText('● Live Synchronized Playout');
       });
 
       call.on('close', () => {
         setIsAudioActive(false);
-        setStatusText('Audio stream ended.');
+        setStatusText('Audio Feed Stopped');
       });
     });
 
     peer.on('error', (err) => {
       console.error('[Receiver] Peer error:', err);
-      setStatusText('Connection error. Is the Room Code correct?');
+      setStatusText('Station connection failed. Verify session code.');
     });
 
     peerRef.current = peer;
@@ -146,230 +140,219 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     if (wakeLockRef.current) wakeLockRef.current.release();
     setIsConnected(false);
     setIsAudioActive(false);
+    setStatusText('Receiver Standby');
   };
 
   return (
-    <div style={{ maxWidth: '600px', margin: '0 auto', padding: '24px 16px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ maxWidth: '580px', margin: '0 auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
       
-      {/* Top Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <span style={{ 
-            background: 'rgba(255, 0, 122, 0.15)', 
-            color: 'var(--accent-magenta)', 
-            padding: '4px 12px', 
-            borderRadius: '20px', 
-            fontSize: '12px', 
-            fontWeight: '700',
-            letterSpacing: '1px'
-          }}>
-            SPEAKER NODE
-          </span>
-          <h1 style={{ fontSize: '24px', fontWeight: '800', marginTop: '4px' }}>Satellite Receiver</h1>
-        </div>
-
-        <button onClick={onBack} className="btn-secondary" style={{ padding: '8px 16px', fontSize: '13px' }}>
-          Change Mode
-        </button>
-      </div>
-
-      {!isConnected ? (
-        /* Connect Form */
-        <div className="glass-panel" style={{ padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-          <div style={{ textAlign: 'center', marginBottom: '8px' }}>
-            <Speaker size={48} color="var(--accent-cyan)" style={{ marginBottom: '12px' }} />
-            <h2 style={{ fontSize: '18px', fontWeight: '700' }}>Link to Party Room</h2>
-            <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
-              Turn this device and its speakers into a synchronized satellite audio node
-            </p>
+      {/* Console Top Deck */}
+      <div className="analog-deck" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ 
+                width: '10px', 
+                height: '10px', 
+                borderRadius: '50%', 
+                background: isAudioActive ? 'var(--amber-bright)' : '#44403c',
+                boxShadow: isAudioActive ? '0 0 10px var(--amber-core)' : 'none'
+              }} />
+              <span className="font-mono" style={{ fontSize: '11px', letterSpacing: '1.5px', color: isAudioActive ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
+                {isAudioActive ? 'RECEIVING FEED' : 'STANDBY'}
+              </span>
+            </div>
+            <h1 className="font-serif" style={{ fontSize: '24px', fontWeight: '700', marginTop: '2px' }}>
+              Satellite Receiver
+            </h1>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-muted)' }}>Room Code (From Host Screen):</label>
-            <input 
-              type="text" 
-              placeholder="e.g. PARTY-4821" 
-              value={roomId} 
-              onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-              style={{
-                width: '100%',
-                padding: '14px 16px',
-                background: 'rgba(0,0,0,0.4)',
-                border: '1px solid var(--border-color)',
-                borderRadius: '12px',
-                color: '#fff',
-                fontSize: '18px',
-                fontWeight: '700',
-                letterSpacing: '2px',
-                textAlign: 'center',
-                fontFamily: 'monospace'
-              }}
-            />
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-muted)' }}>Speaker Name / Location:</label>
-            <input 
-              type="text" 
-              placeholder="e.g. Left Couch, Car Stereo, JBL Flip" 
-              value={deviceName} 
-              onChange={(e) => setDeviceName(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '12px 16px',
-                background: 'rgba(0,0,0,0.4)',
-                border: '1px solid var(--border-color)',
-                borderRadius: '12px',
-                color: '#fff',
-                fontSize: '14px'
-              }}
-            />
-          </div>
-
-          <button onClick={connectToHost} className="btn-primary" style={{ width: '100%', padding: '16px', fontSize: '15px' }}>
-            <Zap size={18} />
-            Connect & Activate Speaker
+          <button onClick={onBack} className="btn-analog" style={{ fontSize: '12px', padding: '6px 14px' }}>
+            Switch Mode
           </button>
-
-          <div style={{ textAlign: 'center', fontSize: '12px', color: 'var(--text-dim)' }}>
-            Status: {statusText}
-          </div>
         </div>
-      ) : (
-        /* Connected Speaker Controls */
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          
-          {/* Status Banner */}
-          <div className="glass-panel" style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: isAudioActive ? 'var(--status-green)' : 'var(--accent-magenta)' }} />
+
+        {!isConnected ? (
+          /* Connect Deck */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div className="analog-inset" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SESSION CODE:</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. SESSION-4821" 
+                  value={roomId} 
+                  onChange={(e) => setRoomId(e.target.value.toUpperCase())}
+                  className="font-mono"
+                  style={{
+                    width: '100%',
+                    padding: '14px',
+                    background: '#0d0c0a',
+                    border: '1px solid var(--border-deck)',
+                    borderRadius: '10px',
+                    color: 'var(--amber-bright)',
+                    fontSize: '18px',
+                    fontWeight: '700',
+                    letterSpacing: '2px',
+                    textAlign: 'center'
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>SPEAKER IDENTIFIER:</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. Left Table, Car Stereo, JBL" 
+                  value={deviceName} 
+                  onChange={(e) => setDeviceName(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    background: '#0d0c0a',
+                    border: '1px solid var(--border-deck)',
+                    borderRadius: '10px',
+                    color: 'var(--text-cream)',
+                    fontSize: '14px'
+                  }}
+                />
+              </div>
+            </div>
+
+            <button onClick={connectToHost} className="btn-analog btn-amber" style={{ padding: '16px', fontSize: '15px' }}>
+              <Power size={18} />
+              Engage Satellite Speaker
+            </button>
+
+            <div style={{ textAlign: 'center', fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
+              {statusText}
+            </div>
+          </div>
+        ) : (
+          /* Active Speaker Deck */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            
+            {/* Status Inset */}
+            <div className="analog-inset" style={{ padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <strong style={{ fontSize: '14px' }}>Room: {roomId}</strong>
-                <div style={{ fontSize: '12px', color: isAudioActive ? 'var(--status-green)' : 'var(--text-muted)' }}>
+                <span className="font-mono" style={{ fontSize: '10px', color: 'var(--text-muted)' }}>LOCKED TO:</span>
+                <strong className="font-mono" style={{ display: 'block', fontSize: '14px', color: 'var(--amber-bright)' }}>{roomId}</strong>
+                <div style={{ fontSize: '11px', color: isAudioActive ? 'var(--amber-bright)' : 'var(--text-dim)', marginTop: '2px' }}>
                   {statusText}
                 </div>
               </div>
-            </div>
 
-            <button onClick={disconnect} className="btn-danger" style={{ fontSize: '12px', padding: '6px 12px' }}>
-              Disconnect
-            </button>
-          </div>
-
-          {/* Spatial Channel Assignment */}
-          <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <h3 style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-muted)' }}>
-              1. Spatial Role Placement:
-            </h3>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
-              {[
-                { id: 'stereo', label: 'All (Stereo)', desc: 'Standard' },
-                { id: 'left', label: 'Left (L)', desc: 'Room Left' },
-                { id: 'right', label: 'Right (R)', desc: 'Room Right' },
-                { id: 'bass', label: 'Sub (Bass)', desc: 'Low-Pass' },
-              ].map(role => (
-                <button
-                  key={role.id}
-                  onClick={() => handleRoleChange(role.id)}
-                  style={{
-                    padding: '12px 6px',
-                    borderRadius: '12px',
-                    border: '1px solid',
-                    borderColor: speakerRole === role.id ? 'var(--accent-cyan)' : 'var(--border-color)',
-                    background: speakerRole === role.id ? 'rgba(0, 245, 255, 0.2)' : 'rgba(255,255,255,0.03)',
-                    color: speakerRole === role.id ? '#fff' : 'var(--text-muted)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: '4px'
-                  }}
-                >
-                  <strong style={{ fontSize: '12px' }}>{role.label}</strong>
-                  <span style={{ fontSize: '10px', opacity: 0.7 }}>{role.desc}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Precision Latency Calibration Slider */}
-          <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h3 style={{ fontSize: '14px', fontWeight: '700' }}>2. Sync Delay Calibration:</h3>
-                <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                  Tune Bluetooth DAC processing delay to eliminate echo
-                </p>
-              </div>
-              <span style={{ fontSize: '16px', fontWeight: '800', fontFamily: 'monospace', color: 'var(--accent-cyan)' }}>
-                {delayMs > 0 ? `+${delayMs}` : delayMs} ms
-              </span>
-            </div>
-
-            <input 
-              type="range" 
-              min="-200" 
-              max="300" 
-              step="5"
-              value={delayMs} 
-              onChange={(e) => handleDelayChange(parseInt(e.target.value))} 
-            />
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-dim)' }}>
-              <span>Ahead (-200ms)</span>
-              <span>In-Sync (0ms)</span>
-              <span>Delay (+300ms)</span>
-            </div>
-          </div>
-
-          {/* Volume Control */}
-          <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Volume2 size={18} color="var(--accent-cyan)" />
-                <h3 style={{ fontSize: '14px', fontWeight: '700' }}>3. Speaker Volume:</h3>
-              </div>
-              <span style={{ fontSize: '14px', fontWeight: '700', fontFamily: 'monospace' }}>
-                {Math.round(volume * 100)}%
-              </span>
-            </div>
-
-            <input 
-              type="range" 
-              min="0" 
-              max="1.5" 
-              step="0.05"
-              value={volume} 
-              onChange={(e) => handleVolumeChange(parseFloat(e.target.value))} 
-            />
-          </div>
-
-          {/* Live Reactive Visualizer */}
-          <div className="glass-panel" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--accent-cyan)' }}>
-                ● ROOM BEAT REACTOR
-              </span>
-              <button 
-                onClick={() => setIsFullscreenVisualizer(!isFullscreenVisualizer)}
-                className="btn-secondary" 
-                style={{ padding: '4px 10px', fontSize: '11px', gap: '4px' }}
-              >
-                <Maximize size={12} />
-                {isFullscreenVisualizer ? 'Exit Fullscreen' : 'Fullscreen Party Visualizer'}
+              <button onClick={disconnect} className="btn-analog" style={{ fontSize: '11px', padding: '6px 12px' }}>
+                Cut Link
               </button>
             </div>
 
-            <Visualizer 
-              analyser={audioProcessor.analyserNode} 
-              active={isAudioActive} 
-              height={isFullscreenVisualizer ? 260 : 90} 
-            />
-          </div>
+            {/* Spatial Role Pan */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                1. SPATIAL CHANNEL ASSIGNMENT:
+              </span>
 
-        </div>
-      )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
+                {[
+                  { id: 'stereo', label: 'ALL', desc: 'Stereo' },
+                  { id: 'left', label: 'LEFT', desc: 'L-Pan' },
+                  { id: 'right', label: 'RIGHT', desc: 'R-Pan' },
+                  { id: 'bass', label: 'SUB', desc: 'Bass' },
+                ].map(role => (
+                  <button
+                    key={role.id}
+                    onClick={() => handleRoleChange(role.id)}
+                    className="btn-analog"
+                    style={{
+                      padding: '10px 4px',
+                      flexDirection: 'column',
+                      gap: '2px',
+                      background: speakerRole === role.id ? 'var(--amber-core)' : '#1a1816',
+                      color: speakerRole === role.id ? '#0c0b0a' : 'var(--text-muted)',
+                      borderColor: speakerRole === role.id ? 'var(--amber-bright)' : 'var(--border-deck)'
+                    }}
+                  >
+                    <strong style={{ fontSize: '12px' }}>{role.label}</strong>
+                    <span style={{ fontSize: '9px', opacity: 0.7 }}>{role.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Rotary-Style Latency Calibration */}
+            <div className="analog-inset" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: '12px', fontWeight: '700' }}>2. Tape Head Alignment (Echo Offset):</div>
+                  <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Eliminates Bluetooth speaker internal processing lag</div>
+                </div>
+                <span className="font-mono paper-badge" style={{ padding: '2px 8px' }}>
+                  {delayMs > 0 ? `+${delayMs}` : delayMs} ms
+                </span>
+              </div>
+
+              <input 
+                type="range" 
+                min="-200" 
+                max="300" 
+                step="5"
+                value={delayMs} 
+                onChange={(e) => handleDelayChange(parseInt(e.target.value))} 
+              />
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
+                <span>Ahead (-200ms)</span>
+                <span>Lock (0ms)</span>
+                <span>Lag (+300ms)</span>
+              </div>
+            </div>
+
+            {/* Volume Potentiometer */}
+            <div className="analog-inset" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>3. OUTPUT LEVEL:</span>
+                <span className="font-mono" style={{ fontSize: '12px', color: 'var(--amber-bright)' }}>{Math.round(volume * 100)}%</span>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="1.5" 
+                step="0.05"
+                value={volume} 
+                onChange={(e) => handleVolumeChange(parseFloat(e.target.value))} 
+              />
+            </div>
+
+            {/* Lofi Analog VU Meter */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="font-mono" style={{ fontSize: '10px', color: 'var(--amber-bright)', letterSpacing: '1px' }}>
+                  ● ANALOG LEVEL MONITOR
+                </span>
+                <button 
+                  onClick={() => setIsFullscreenVisualizer(!isFullscreenVisualizer)}
+                  className="btn-analog" 
+                  style={{ padding: '3px 8px', fontSize: '10px' }}
+                >
+                  <Maximize size={10} />
+                  {isFullscreenVisualizer ? 'Compact' : 'Expanded View'}
+                </button>
+              </div>
+
+              <Visualizer 
+                analyser={audioProcessor.analyserNode} 
+                active={isAudioActive} 
+                height={isFullscreenVisualizer ? 200 : 64} 
+              />
+            </div>
+
+          </div>
+        )}
+
+      </div>
 
     </div>
   );
