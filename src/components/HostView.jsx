@@ -121,7 +121,14 @@ export default function HostView({ onBack }) {
     peerRef.current = peer;
   };
 
+  const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('firefox');
+
   const startScreenCapture = async () => {
+    if (isFirefox) {
+      setShowAudioMissingHelp(true);
+      return;
+    }
+
     try {
       const mediaStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -396,7 +403,9 @@ export default function HostView({ onBack }) {
               <Monitor size={18} />
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontSize: '13px', fontWeight: '600' }}>Screen / Tab Loopback</div>
-                <div style={{ fontSize: '11px', opacity: 0.7 }}>Spotify, Netflix, YouTube</div>
+                <div style={{ fontSize: '11px', color: isFirefox ? 'var(--amber-bright)' : 'rgba(244, 239, 230, 0.7)' }}>
+                  {isFirefox ? '⚠️ Chrome / Edge needed for Tab Audio' : 'Spotify, Netflix, YouTube'}
+                </div>
               </div>
             </button>
 
@@ -604,53 +613,82 @@ export default function HostView({ onBack }) {
 
             <div>
               <span className="paper-badge" style={{ fontSize: '11px', color: 'var(--amber-bright)', marginBottom: '8px' }}>
-                ⚠️ AUDIO PERMISSION REQUIRED
+                {isFirefox ? '🦊 FIREFOX BROWSER LIMITATION' : '⚠️ AUDIO PERMISSION REQUIRED'}
               </span>
               <h3 className="font-serif" style={{ fontSize: '22px', fontWeight: '800', color: 'var(--text-cream)', marginTop: '4px' }}>
-                How to Pick Up Audio in Chrome
+                {isFirefox ? 'Firefox Does Not Support Tab Audio' : 'How to Pick Up Audio in Chrome'}
               </h3>
               <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px', lineHeight: '1.5' }}>
-                Chrome blocked audio because the audio toggle wasn't turned on in the browser popup:
+                {isFirefox 
+                  ? 'Mozilla Firefox only supports sharing video, not audio from tabs or desktop (Mozilla Bug #1541425).' 
+                  : 'Chrome blocked audio because the audio toggle was not turned on in the browser popup:'}
               </p>
             </div>
 
-            {/* Visual 3-Step Guide */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: '#100f0d', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-deck)' }}>
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>1</span>
-                <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
-                  <strong>Select "Chrome Tab"</strong> (at the top of the popup) and click your Spotify Web, YouTube, or Netflix tab.
+            {/* Visual Guide / Solutions */}
+            {isFirefox ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: '#100f0d', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-deck)' }}>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>1</span>
+                  <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                    <strong>To stream Spotify, Netflix, or YouTube:</strong> Open this page in <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> on your laptop. (Chromium browsers support direct tab audio capture out of the box).
+                  </div>
                 </div>
-              </div>
 
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>2</span>
-                <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
-                  <strong>Turn ON "Also share tab audio"</strong> at the bottom-left corner of the Chrome dialog.
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>2</span>
+                  <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                    <strong>Want to stay in Firefox?</strong> Select <strong>"Local Audio / Movie File"</strong> below to stream MP3, WAV, or MP4 files in perfect sync right now!
+                  </div>
                 </div>
-              </div>
 
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>3</span>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                  <em>Using Desktop Spotify App?</em> Choose <strong>"Entire Screen"</strong> and check <strong>"Share system audio"</strong>. (Chrome does NOT support audio from the "Window" tab).
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>3</span>
+                  <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                    <strong>Test mesh right now:</strong> Click <strong>"Test Synth Groove"</strong> below to hear live audio pipe to your phone immediately in Firefox.
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: '#100f0d', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-deck)' }}>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>1</span>
+                  <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                    <strong>Select "Chrome Tab"</strong> (at the top of the popup) and click your Spotify Web, YouTube, or Netflix tab.
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>2</span>
+                  <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                    <strong>Turn ON "Also share tab audio"</strong> at the bottom-left corner of the Chrome dialog.
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                  <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '4px', width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>3</span>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    <em>Using Desktop Spotify App?</em> Choose <strong>"Entire Screen"</strong> and check <strong>"Share system audio"</strong>. (Chrome does NOT support audio from the "Window" tab).
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <button 
-                onClick={() => { setShowAudioMissingHelp(false); startScreenCapture(); }} 
-                className="btn-analog btn-amber" 
-                style={{ flex: 1, padding: '12px', fontSize: '13px' }}
-              >
-                🔄 Try Again (Open Popup)
-              </button>
+              {!isFirefox && (
+                <button 
+                  onClick={() => { setShowAudioMissingHelp(false); startScreenCapture(); }} 
+                  className="btn-analog btn-amber" 
+                  style={{ flex: 1, padding: '12px', fontSize: '13px' }}
+                >
+                  🔄 Try Again (Open Popup)
+                </button>
+              )}
 
               <button 
                 onClick={() => { setShowAudioMissingHelp(false); setSourceType('synth'); startSynthGenerator(); }} 
-                className="btn-analog" 
-                style={{ padding: '12px', fontSize: '13px' }}
+                className={`btn-analog ${isFirefox ? 'btn-amber' : ''}`} 
+                style={{ flex: isFirefox ? 1 : 'none', padding: '12px', fontSize: '13px' }}
               >
                 ⚡ Test Synth Groove
               </button>
@@ -660,7 +698,7 @@ export default function HostView({ onBack }) {
                 className="btn-analog" 
                 style={{ padding: '12px', fontSize: '13px' }}
               >
-                Cancel
+                Close
               </button>
             </div>
           </div>
