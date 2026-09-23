@@ -269,19 +269,40 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           /* Active Speaker Deck */
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             
-            {/* Status Inset */}
-            <div className="analog-inset" style={{ padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <span className="font-mono" style={{ fontSize: '10px', color: 'var(--text-muted)' }}>LOCKED TO:</span>
-                <strong className="font-mono" style={{ display: 'block', fontSize: '14px', color: 'var(--amber-bright)' }}>{roomId}</strong>
-                <div style={{ fontSize: '11px', color: isAudioActive ? 'var(--amber-bright)' : 'var(--text-dim)', marginTop: '2px' }}>
-                  {statusText}
+            {/* Live Wi-Fi Mesh Status Inset */}
+            <div style={{
+              padding: '14px 16px',
+              borderRadius: '12px',
+              background: isAudioActive ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.1)',
+              border: `1px solid ${isAudioActive ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.25)'}`,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    background: isAudioActive ? '#10b981' : '#f59e0b',
+                    boxShadow: isAudioActive ? '0 0 8px #10b981' : 'none'
+                  }} />
+                  <strong className="font-mono" style={{ fontSize: '12px', color: isAudioActive ? '#10b981' : 'var(--amber-bright)' }}>
+                    {isAudioActive ? 'LIVE WI-FI AUDIO STREAMING' : 'LINKED OVER LOCAL WI-FI'}
+                  </strong>
                 </div>
+
+                <button onClick={disconnect} className="btn-analog" style={{ fontSize: '11px', padding: '4px 10px' }}>
+                  Cut Link
+                </button>
               </div>
 
-              <button onClick={disconnect} className="btn-analog" style={{ fontSize: '11px', padding: '6px 12px' }}>
-                Cut Link
-              </button>
+              <div style={{ fontSize: '12px', color: 'var(--text-cream)' }}>
+                {isAudioActive 
+                  ? '● Audio is streaming directly device-to-device with sub-20ms synchronization.' 
+                  : '📡 Connected to Host! Waiting for Host to select audio. (On host laptop, click "Analog Lofi Groove" or "Screen Loopback" to begin streaming!)'}
+              </div>
             </div>
 
             {/* Spatial Role Pan */}

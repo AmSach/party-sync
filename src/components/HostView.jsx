@@ -337,6 +337,42 @@ export default function HostView({ onBack }) {
           </div>
         </div>
 
+        {/* Live Network & Satellite Telemetry Banner */}
+        <div style={{
+          padding: '12px 16px',
+          borderRadius: '12px',
+          background: connectedPeers.length > 0 
+            ? 'rgba(16, 185, 129, 0.12)' 
+            : 'rgba(245, 158, 11, 0.08)',
+          border: `1px solid ${connectedPeers.length > 0 ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.25)'}`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '10px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              background: connectedPeers.length > 0 ? '#10b981' : '#f59e0b',
+              boxShadow: connectedPeers.length > 0 ? '0 0 10px #10b981' : 'none'
+            }} />
+            <span className="font-mono" style={{ fontSize: '12px', fontWeight: '700', color: connectedPeers.length > 0 ? '#10b981' : 'var(--text-cream)' }}>
+              {connectedPeers.length === 0 
+                ? 'WAITING FOR SATELLITE PHONES TO TUNE IN...' 
+                : `WI-FI DIRECT MESH ACTIVE • ${connectedPeers.length} PHONE(S) LINKED`}
+            </span>
+          </div>
+
+          <span className="font-mono" style={{ fontSize: '11px', color: isBroadcasting ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
+            {isBroadcasting 
+              ? `● TRANSMITTING DIRECT P2P WI-FI AUDIO (<20ms)` 
+              : 'CLICK A SOURCE BELOW TO BROADCAST'}
+          </span>
+        </div>
+
         {/* Source Selector Rack */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)', letterSpacing: '1px' }}>
