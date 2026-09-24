@@ -18,7 +18,7 @@ export default function HostView({ onBack }) {
   const [copied, setCopied] = useState(false);
   
   // Host local playback pipeline delay & mute controls
-  const [laptopMuted, setLaptopMuted] = useState(false);
+  const [laptopMuted, setLaptopMuted] = useState(true); // Default to Muted (Party Mode: Phones Only) to prevent double-audio comb-filtering on host!
   const [hostDelayMs, setHostDelayMs] = useState(120); // Stable locked default matching WebRTC transmission
   const [isFlashing, setIsFlashing] = useState(false);
 
@@ -203,7 +203,8 @@ export default function HostView({ onBack }) {
           suppressLocalAudioPlayback: true,
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false
+          autoGainControl: false,
+          channelCount: 2
         },
         systemAudio: 'include',
         surfaceSwitching: 'include'
@@ -309,10 +310,26 @@ export default function HostView({ onBack }) {
     audioStreamRef.current = stream;
     setIsBroadcasting(true);
 
+    // CRITICAL: Set contentHint = 'music' on all tracks!
+    // Disables browser speech filtering, prevents treble/bass cutoff, and switches Opus to full-band CELT music mode!
+    stream.getAudioTracks().forEach(track => {
+      if ('contentHint' in track) {
+        track.contentHint = 'music';
+      }
+      try {
+        track.applyConstraints({
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 2
+        });
+      } catch (e) {}
+    });
+
     console.log(`[Host] Broadcasting Studio Hi-Fi Opus audio stream to ${activeConnectionsRef.current.size} satellites`);
     activeConnectionsRef.current.forEach((conn, peerId) => {
       if (peerRef.current && peerRef.current.open) {
-        console.log(`[Host] Calling satellite ${peerId} with 256kbps audio`);
+        console.log(`[Host] Calling satellite ${peerId} with pristine stereo music audio`);
         try {
           peerRef.current.call(peerId, stream);
         } catch (err) {
@@ -325,7 +342,8 @@ export default function HostView({ onBack }) {
     });
 
     try {
-      const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
       audioContextRef.current = ctx;
       if (ctx.state === 'suspended') ctx.resume();
 
@@ -343,7 +361,7 @@ export default function HostView({ onBack }) {
       analyserRef.current = analyser;
 
       // DELAY NODE: Delays Host Laptop speaker playback by hostDelayMs (120ms)
-      // to eliminate the slap-back echo between laptop and phones!
+      // to eliminate the slap-back echo between laptop and phones when laptop speaker is active
       const hostDelay = ctx.createDelay(1.0);
       hostDelay.delayTime.setValueAtTime(hostDelayMs / 1000, ctx.currentTime);
       hostDelayNodeRef.current = hostDelay;
@@ -353,18 +371,10 @@ export default function HostView({ onBack }) {
       hostGain.gain.setValueAtTime(laptopMuted ? 0 : 1.0, ctx.currentTime);
       hostGainNodeRef.current = hostGain;
 
-      // Master Soft-Knee Compressor / Limiter to prevent distortion on laptop speakers
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.setValueAtTime(-1.0, ctx.currentTime);
-      compressor.knee.setValueAtTime(12, ctx.currentTime);
-      compressor.ratio.setValueAtTime(20, ctx.currentTime);
-      compressor.attack.setValueAtTime(0.003, ctx.currentTime);
-      compressor.release.setValueAtTime(0.20, ctx.currentTime);
-
+      // Clean Bit-Perfect Direct Audio Pipeline (ZERO COMPRESSOR - prevents treble squashing and muffling)
       source.connect(hostDelay);
       hostDelay.connect(hostGain);
-      hostGain.connect(compressor);
-      compressor.connect(ctx.destination);
+      hostGain.connect(ctx.destination);
     } catch (e) {
       console.warn("[Host] Audio pipeline notice:", e);
     }

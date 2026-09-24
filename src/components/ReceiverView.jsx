@@ -174,16 +174,20 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       call.on('stream', (remoteAudioStream) => {
         console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
         
-        // Route audio through Web Audio API with soft-knee limiter and delay
-        audioProcessor.setupStream(remoteAudioStream);
-        webrtcStreamRef.current = remoteAudioStream; // Store for acoustic auto-sync mic calibration
+        remoteAudioStream.getAudioTracks().forEach(track => {
+          if ('contentHint' in track) {
+            track.contentHint = 'music';
+          }
+        });
 
-        // CRITICAL FIX FOR AUDIO DISTORTION:
-        // The hidden <audio> element is muted so it does NOT play simultaneously with Web Audio!
-        // Playing both simultaneously caused massive phase distortion, comb filtering, and clipping.
+        // Route audio through Web Audio API (uncompressed bit-perfect 48kHz)
+        audioProcessor.setupStream(remoteAudioStream);
+
+        // Hidden <audio> element is muted & volume 0 to prevent dual playback comb filtering
         if (audioElRef.current) {
           audioElRef.current.srcObject = remoteAudioStream;
           audioElRef.current.muted = true;
+          audioElRef.current.volume = 0;
           audioElRef.current.play().catch(e => console.log('Audio element play notice:', e));
         }
 

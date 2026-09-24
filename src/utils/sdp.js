@@ -19,10 +19,10 @@ export function configureHighFidelityAudioSDP(sdp) {
     // Broadcast High-Fidelity Stereo Parameters:
     // - stereo=1: Full stereo channel decoding
     // - sprop-stereo=1: Signal stereo capabilities in SDP
-    // - maxaveragebitrate=128000: Broadcast standard 128kbps stereo (transparent music fidelity, prevents Wi-Fi buffer congestion)
+    // - maxaveragebitrate=192000: Broadcast standard 192kbps stereo (transparent music fidelity)
     // - maxplaybackrate=48000: Full 48kHz frequency spectrum
     // - useinbandfec=1: CRITICAL: In-Band Forward Error Correction seamlessly heals dropped Wi-Fi packets without audio corruption clicks!
-    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=128000;maxplaybackrate=48000;useinbandfec=1';
+    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=192000;maxplaybackrate=48000;useinbandfec=1';
 
     if (fmtpRegex.test(modified)) {
       modified = modified.replace(fmtpRegex, (match, existing) => {

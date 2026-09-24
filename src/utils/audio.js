@@ -18,7 +18,7 @@ class SyncedAudioProcessor {
   init() {
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
+      this.ctx = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
@@ -30,9 +30,16 @@ class SyncedAudioProcessor {
     this.disconnect();
 
     try {
+      // Ensure browser treats stream as music (disables telephone speech filtering)
+      mediaStream.getAudioTracks().forEach(track => {
+        if ('contentHint' in track) {
+          track.contentHint = 'music';
+        }
+      });
+
       this.sourceNode = this.ctx.createMediaStreamSource(mediaStream);
       
-      // Delay Node supporting up to 2.0s (sufficient for extreme Bluetooth latencies)
+      // Delay Node supporting up to 2.0s (sufficient for Bluetooth latencies)
       this.delayNode = this.ctx.createDelay(2.0);
       const initialDelay = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
       this.delayNode.delayTime.setValueAtTime(initialDelay, this.ctx.currentTime);
@@ -40,26 +47,18 @@ class SyncedAudioProcessor {
       this.gainNode = this.ctx.createGain();
       this.gainNode.gain.setValueAtTime(this.currentVolume, this.ctx.currentTime);
 
-      // Studio Master Limiter / Compressor: Prevents digital 0dBFS clipping on phone speakers
-      this.compressorNode = this.ctx.createDynamicsCompressor();
-      this.compressorNode.threshold.setValueAtTime(-1.0, this.ctx.currentTime);
-      this.compressorNode.knee.setValueAtTime(12, this.ctx.currentTime);
-      this.compressorNode.ratio.setValueAtTime(20, this.ctx.currentTime);
-      this.compressorNode.attack.setValueAtTime(0.003, this.ctx.currentTime);
-      this.compressorNode.release.setValueAtTime(0.20, this.ctx.currentTime);
-
       this.analyserNode = this.ctx.createAnalyser();
       this.analyserNode.fftSize = 128;
       this.analyserNode.smoothingTimeConstant = 0.8;
 
-      // Audio Graph: source -> delay -> gain -> compressor -> destination & analyser
+      // Audio Graph: Pure Bit-Perfect Passthrough (NO COMPRESSOR - zero squashing/muffling!)
+      // source -> delay -> gain -> destination & analyser
       this.sourceNode.connect(this.delayNode);
       this.delayNode.connect(this.gainNode);
-      this.gainNode.connect(this.compressorNode);
-      this.compressorNode.connect(this.ctx.destination);
+      this.gainNode.connect(this.ctx.destination);
       this.gainNode.connect(this.analyserNode);
 
-      console.log('[AudioProcessor] Hi-Fi Audio pipeline connected cleanly with soft-knee limiter');
+      console.log('[AudioProcessor] Pure Hi-Fi Stereo Audio pipeline connected (48kHz Uncompressed)');
     } catch (err) {
       console.error('[AudioProcessor] setupStream error:', err);
     }
