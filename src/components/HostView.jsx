@@ -29,11 +29,16 @@ export default function HostView({ onBack }) {
   const peerRef = useRef(null);
   const audioStreamRef = useRef(null);
   const videoElementRef = useRef(null);
+  const audioElementRef = useRef(null);
+  const mediaElementSourceRef = useRef(null);
+  const streamDestRef = useRef(null);
   const audioContextRef = useRef(null);
   const hostDelayNodeRef = useRef(null);
   const hostGainNodeRef = useRef(null);
   const hostSourceNodeRef = useRef(null);
   const synthIntervalRef = useRef(null);
+  const metronomeIntervalRef = useRef(null);
+  const [isMetronomeActive, setIsMetronomeActive] = useState(false);
   const analyserRef = useRef(null);
   const activeConnectionsRef = useRef(new Map());
   const activeMediaTitleRef = useRef('No audio source selected');
@@ -200,7 +205,7 @@ export default function HostView({ onBack }) {
           displaySurface: 'browser'
         },
         audio: {
-          suppressLocalAudioPlayback: true,
+          suppressLocalAudioPlayback: false, // Prevents Windows WASAPI audio ducking & BLE degradation
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -221,7 +226,16 @@ export default function HostView({ onBack }) {
       const title = mediaStream.getVideoTracks()[0]?.label || "Desktop / Movie Audio Loopback";
       setActiveMediaTitle(title);
       activeMediaTitleRef.current = title;
-      setupHostAudio(mediaStream);
+
+      // Extract ONLY audio tracks to avoid wasting Wi-Fi bandwidth on video!
+      const audioOnlyStream = new MediaStream(audioTracks);
+
+      // Stop video tracks immediately to save CPU and network bandwidth
+      mediaStream.getVideoTracks().forEach(t => t.stop());
+
+      // Screen capture: Default laptopMuted to true so host laptop does not echo the already-playing tab!
+      setLaptopMuted(true);
+      setupHostAudio(audioOnlyStream, true);
     } catch (err) {
       console.error("[Host] Screen capture error:", err);
     }
@@ -231,27 +245,67 @@ export default function HostView({ onBack }) {
     const file = e.target.files[0];
     if (!file) return;
 
+    // Clean up previous broadcast
+    stopBroadcasting(false);
+
     setActiveMediaTitle(file.name);
     activeMediaTitleRef.current = file.name;
     const fileUrl = URL.createObjectURL(file);
 
-    if (videoElementRef.current) {
-      videoElementRef.current.src = fileUrl;
-      // CRITICAL: Mute the <video> element so it doesn't play twice or clip!
-      videoElementRef.current.muted = true;
-      videoElementRef.current.play();
+    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
+    audioContextRef.current = ctx;
+    if (ctx.state === 'suspended') ctx.resume();
 
-      let stream;
-      if (videoElementRef.current.captureStream) {
-        stream = videoElementRef.current.captureStream();
-      } else if (videoElementRef.current.mozCaptureStream) {
-        stream = videoElementRef.current.mozCaptureStream();
-      }
-
-      if (stream) {
-        setupHostAudio(stream);
-      }
+    // Create an audio element for pristine audio decoding
+    if (!audioElementRef.current) {
+      const audioEl = new Audio();
+      audioEl.crossOrigin = 'anonymous';
+      audioElementRef.current = audioEl;
     }
+    const audioEl = audioElementRef.current;
+    audioEl.src = fileUrl;
+    audioEl.loop = true;
+
+    if (!mediaElementSourceRef.current) {
+      mediaElementSourceRef.current = ctx.createMediaElementSource(audioEl);
+    }
+    const sourceNode = mediaElementSourceRef.current;
+
+    if (!streamDestRef.current) {
+      streamDestRef.current = ctx.createMediaStreamDestination();
+    }
+    const streamDest = streamDestRef.current;
+
+    try { sourceNode.disconnect(); } catch (err) {}
+
+    // Visualizer
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 128;
+    sourceNode.connect(analyser);
+    analyserRef.current = analyser;
+
+    // Route to WebRTC broadcast destination
+    sourceNode.connect(streamDest);
+
+    // Host local playback pipeline
+    const hostDelay = ctx.createDelay(1.0);
+    hostDelay.delayTime.setValueAtTime(hostDelayMs / 1000, ctx.currentTime);
+    hostDelayNodeRef.current = hostDelay;
+
+    const hostGain = ctx.createGain();
+    hostGain.gain.setValueAtTime(1.0, ctx.currentTime);
+    hostGainNodeRef.current = hostGain;
+    setLaptopMuted(false); // Enable laptop playback for local files!
+
+    sourceNode.connect(hostDelay);
+    hostDelay.connect(hostGain);
+    hostGain.connect(ctx.destination);
+
+    audioEl.play().catch(err => console.error("[Host] Audio playback error:", err));
+
+    // Broadcast audio-only stream to satellites
+    setupHostAudio(streamDest.stream, false);
   };
 
   const startMicCapture = async () => {
@@ -267,14 +321,15 @@ export default function HostView({ onBack }) {
       });
       setActiveMediaTitle("Live Room Mic / DJ Line-in");
       activeMediaTitleRef.current = "Live Room Mic / DJ Line-in";
-      setupHostAudio(stream);
+      setLaptopMuted(true); // Mute host to prevent feedback loop
+      setupHostAudio(stream, true);
     } catch (err) {
       console.error("[Host] Mic error:", err);
     }
   };
 
   const startSynthGenerator = () => {
-    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive', sampleRate: 48000 });
     audioContextRef.current = ctx;
     if (ctx.state === 'suspended') ctx.resume();
 
@@ -303,10 +358,11 @@ export default function HostView({ onBack }) {
 
     setActiveMediaTitle("Warm Analog Lofi Chords (Test Loop)");
     activeMediaTitleRef.current = "Warm Analog Lofi Chords (Test Loop)";
-    setupHostAudio(dest.stream);
+    setLaptopMuted(false); // Enable laptop playback for synth!
+    setupHostAudio(dest.stream, false);
   };
 
-  const setupHostAudio = (stream) => {
+  const setupHostAudio = (stream, isScreenCapture = false) => {
     audioStreamRef.current = stream;
     setIsBroadcasting(true);
 
@@ -368,7 +424,9 @@ export default function HostView({ onBack }) {
 
       // GAIN NODE: For muting laptop speakers
       const hostGain = ctx.createGain();
-      hostGain.gain.setValueAtTime(laptopMuted ? 0 : 1.0, ctx.currentTime);
+      const shouldMute = isScreenCapture ? true : false;
+      setLaptopMuted(shouldMute);
+      hostGain.gain.setValueAtTime(shouldMute ? 0 : 1.0, ctx.currentTime);
       hostGainNodeRef.current = hostGain;
 
       // Clean Bit-Perfect Direct Audio Pipeline (ZERO COMPRESSOR - prevents treble squashing and muffling)
@@ -378,6 +436,21 @@ export default function HostView({ onBack }) {
     } catch (e) {
       console.warn("[Host] Audio pipeline notice:", e);
     }
+  };
+
+  const toggleMetronome = () => {
+    if (metronomeIntervalRef.current) {
+      clearInterval(metronomeIntervalRef.current);
+      metronomeIntervalRef.current = null;
+      setIsMetronomeActive(false);
+      return;
+    }
+
+    setIsMetronomeActive(true);
+    emitSyncPulse();
+    metronomeIntervalRef.current = setInterval(() => {
+      emitSyncPulse();
+    }, 1000);
   };
 
   const handleToggleLaptopMute = () => {
@@ -410,9 +483,18 @@ export default function HostView({ onBack }) {
 
   const stopBroadcasting = (fullTeardown = false) => {
     setIsBroadcasting(false);
+    if (metronomeIntervalRef.current) {
+      clearInterval(metronomeIntervalRef.current);
+      metronomeIntervalRef.current = null;
+      setIsMetronomeActive(false);
+    }
     if (synthIntervalRef.current) {
       clearInterval(synthIntervalRef.current);
       synthIntervalRef.current = null;
+    }
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      audioElementRef.current.src = '';
     }
     if (audioStreamRef.current) {
       audioStreamRef.current.getTracks().forEach(t => t.stop());
@@ -542,7 +624,17 @@ export default function HostView({ onBack }) {
               title="Click to emit a synchronized sharp click & flash across all screens to verify phase lock"
             >
               <Target size={14} />
-              <span>🎯 Emit Sync Pulse (Sync Clapper)</span>
+              <span>🎯 1-Tap Pulse</span>
+            </button>
+
+            <button
+              onClick={toggleMetronome}
+              className={`btn-analog ${isMetronomeActive ? 'btn-amber' : ''}`}
+              style={{ padding: '6px 12px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
+              title="Toggle continuous 1-second sync tick across all devices to easily hear alignment"
+            >
+              <Clock size={14} />
+              <span>{isMetronomeActive ? '⏹ Stop Metronome' : '⏱ Loop Metronome'}</span>
             </button>
           </div>
         </div>
