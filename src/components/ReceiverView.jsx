@@ -149,10 +149,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           // Process high-resolution master clock synchronization response
           clockSync.handlePong(data);
         } else if (data.type === 'SYNC_CLAPPER') {
-          // Fire scheduled acoustic tick & visual flash at exact microsecond
-          clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash);
+          // Fire scheduled acoustic tick & visual flash through delay pipeline
+          clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash, audioProcessor.delayNode);
         } else if (data.type === 'CALIBRATE_TELEMETRY') {
-          applyTelemetrySync(data.hostDelayMs, data.rtt);
+          applyTelemetrySync(data.hostDelayMs, data.rtt, data.laptopMuted);
         } else if (data.type === 'START_CALIBRATE_CLIENT') {
           performAutoSync();
         }
@@ -240,7 +240,13 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
   };
 
-  const performAutoSync = () => {
+  const requestSyncPulse = () => {
+    if (connRef.current && connRef.current.open) {
+      connRef.current.send({ type: 'EMIT_PULSE_REQUEST' });
+    }
+  };
+
+  const performAutoSync = async () => {
     if (!connRef.current || !connRef.current.open) {
       setAutoSyncStatus('error');
       setAutoSyncMsg('Not connected to Host. Please join session first.');
@@ -248,16 +254,16 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
 
     setAutoSyncStatus('calibrating');
-    setAutoSyncMsg('Measuring network transit and hardware DAC buffers...');
+    setAutoSyncMsg('Measuring network transit (NTP) & hardware DAC buffers...');
 
-    // 1. Refresh high-speed NTP handshake
-    clockSync.startCalibration(connRef.current);
+    // 1. Await high-precision 8-ping NTP calibration burst
+    await clockSync.startCalibration(connRef.current);
 
     // 2. Request host telemetry
     connRef.current.send({ type: 'CALIBRATE_REQUEST' });
   };
 
-  const applyTelemetrySync = (hostDelay = 120, rtt = 10) => {
+  const applyTelemetrySync = (hostDelay = 120, rtt = 10, isHostMuted = false) => {
     const effectiveRtt = rtt > 0 ? rtt : (clockSync.rtt || 10);
     const oneWayTransit = effectiveRtt / 2;
 
@@ -273,15 +279,24 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       profileOffset = 120;
     }
 
-    // Host presentation delay vs receiver base buffer (100ms) and hardware latencies
-    // Target offset brings satellite speaker into phase with host laptop speaker
-    const targetOffset = Math.max(-90, Math.min(350, Math.round(profileOffset - (oneWayTransit + totalDac - 20))));
+    let targetOffset = 0;
+    if (isHostMuted) {
+      // Party Mode (Laptop Muted): Satellites synchronize with each other
+      targetOffset = Math.max(-90, Math.min(350, -profileOffset));
+    } else {
+      // Host Laptop Speaker Active:
+      // Host total latency = hostDelay + 20ms (Host DAC)
+      // Receiver total latency = oneWayTransit + 35ms (WebRTC jitter buffer) + 100ms (base buffer) + targetOffset + totalDac + profileOffset
+      // Set targetOffset so Host total latency == Receiver total latency:
+      targetOffset = Math.round((hostDelay + 20) - (oneWayTransit + 135 + totalDac + profileOffset));
+      targetOffset = Math.max(-90, Math.min(350, targetOffset));
+    }
 
     setDelayMs(targetOffset);
-    audioProcessor.setDelay(targetOffset); // Uses micro-fade, ZERO WHOOSH!
+    audioProcessor.setDelay(targetOffset); // 15ms micro-crossfade, ZERO WHOOSH!
 
     setAutoSyncStatus('done');
-    setAutoSyncMsg(`⚡ Auto-Locked! (Wi-Fi RTT: ${Math.round(effectiveRtt)}ms | DAC: ${totalDac}ms | Target Offset: ${targetOffset >= 0 ? '+' : ''}${targetOffset}ms)`);
+    setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Target Offset: ${targetOffset >= 0 ? '+' : ''}${targetOffset}ms)`);
     triggerVisualFlash();
   };
 
@@ -589,6 +604,24 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               >
                 <Zap size={18} />
                 {autoSyncStatus === 'calibrating' ? 'Measuring Transit & DAC...' : '⚡ Auto-Align & Lock Phase'}
+              </button>
+
+              <button 
+                onClick={requestSyncPulse} 
+                className="btn-analog" 
+                style={{ 
+                  padding: '10px 14px', 
+                  fontSize: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  borderColor: 'var(--border-deck)'
+                }}
+                title="Broadcast a simultaneous click through all speakers to test phase alignment"
+              >
+                <Target size={15} color="var(--accent-bright)" />
+                <span>🎯 Emit Sync Pulse (Verify Alignment)</span>
               </button>
             </div>
 

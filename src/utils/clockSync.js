@@ -17,26 +17,29 @@ class ClockSynchronizer {
 
   // Initiate high-speed calibration handshake over DataChannel
   startCalibration(conn) {
-    if (!conn || !conn.open) return;
+    if (!conn || !conn.open) return Promise.resolve(null);
     this.samples = [];
     this.isSynced = false;
 
-    let count = 0;
-    const sendPing = () => {
-      if (count >= 8 || !conn.open) {
-        this.finalizeCalibration();
-        return;
-      }
-      count++;
-      const t0 = performance.now();
-      conn.send({ type: 'NTP_PING', t0, seq: count });
-    };
+    return new Promise((resolve) => {
+      this._resolveCalibration = resolve;
+      let count = 0;
+      const sendPing = () => {
+        if (count >= 8 || !conn.open) {
+          this.finalizeCalibration();
+          return;
+        }
+        count++;
+        const t0 = performance.now();
+        conn.send({ type: 'NTP_PING', t0, seq: count });
+      };
 
-    // Burst 8 pings spaced by 40ms to find the cleanest network route
-    const interval = setInterval(() => {
-      sendPing();
-      if (count >= 8) clearInterval(interval);
-    }, 50);
+      // Burst 8 pings spaced by 35ms to find the cleanest network route
+      const interval = setInterval(() => {
+        sendPing();
+        if (count >= 8) clearInterval(interval);
+      }, 35);
+    });
   }
 
   // Host handles ping and immediately responds with timestamp
@@ -92,10 +95,18 @@ class ClockSynchronizer {
         offset: this.clockOffset
       });
     }
+
+    if (this._resolveCalibration) {
+      this._resolveCalibration({
+        rtt: this.rtt,
+        offset: this.clockOffset
+      });
+      this._resolveCalibration = null;
+    }
   }
 
   // Schedule an acoustic and visual Sync Clapper tick at an exact future Master Time
-  playScheduledPulse(ctx, targetMasterTime, onVisualFlash) {
+  playScheduledPulse(ctx, targetMasterTime, onVisualFlash, destinationNode = null) {
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
@@ -116,7 +127,11 @@ class ClockSynchronizer {
       gain.gain.exponentialRampToValueAtTime(0.001, triggerAudioTime + 0.02);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      if (destinationNode) {
+        gain.connect(destinationNode);
+      } else {
+        gain.connect(ctx.destination);
+      }
 
       osc.start(triggerAudioTime);
       osc.stop(triggerAudioTime + 0.025);

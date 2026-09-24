@@ -120,6 +120,8 @@ export default function HostView({ onBack }) {
           ClockSynchronizer.handleHostPing(conn, data);
         } else if (data.type === 'CALIBRATE_REQUEST') {
           handleCalibrateRequest(conn);
+        } else if (data.type === 'EMIT_PULSE_REQUEST') {
+          emitSyncPulse();
         }
       });
 
@@ -158,8 +160,11 @@ export default function HostView({ onBack }) {
       }
     });
 
-    // 2. Play scheduled acoustic pulse and trigger flash on Host simultaneously
-    clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash);
+    // 2. Play scheduled acoustic pulse through Host delay pipeline (or destination) and trigger flash
+    const destNode = (!laptopMuted && hostDelayNodeRef.current) 
+      ? hostDelayNodeRef.current 
+      : ctx.destination;
+    clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash, destNode);
   };
 
   // Respond to satellite auto-sync telemetry request
@@ -168,6 +173,7 @@ export default function HostView({ onBack }) {
     conn.send({ 
       type: 'CALIBRATE_TELEMETRY', 
       hostDelayMs: hostDelayMs,
+      laptopMuted: laptopMuted,
       rtt: clockSync.rtt || 0 
     });
     triggerVisualFlash();
@@ -376,7 +382,19 @@ export default function HostView({ onBack }) {
     const clamped = Math.max(0, Math.min(300, ms));
     setHostDelayMs(clamped);
     if (hostDelayNodeRef.current && audioContextRef.current) {
-      hostDelayNodeRef.current.delayTime.setTargetAtTime(clamped / 1000, audioContextRef.current.currentTime, 0.05);
+      const ctx = audioContextRef.current;
+      const now = ctx.currentTime;
+      const gainNode = hostGainNodeRef.current;
+      if (gainNode && !laptopMuted) {
+        gainNode.gain.cancelScheduledValues(now);
+        gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+        gainNode.gain.linearRampToValueAtTime(0.001, now + 0.015);
+        hostDelayNodeRef.current.delayTime.setValueAtTime(clamped / 1000, now + 0.018);
+        gainNode.gain.setValueAtTime(0.001, now + 0.020);
+        gainNode.gain.linearRampToValueAtTime(1.0, now + 0.035);
+      } else {
+        hostDelayNodeRef.current.delayTime.setValueAtTime(clamped / 1000, now);
+      }
     }
   };
 
