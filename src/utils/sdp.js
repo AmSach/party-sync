@@ -1,13 +1,13 @@
-// Studio Hi-Fi Audio SDP Munging for WebRTC
-// Forces Opus to 48kHz Stereo 256kbps Full-Band Studio Music mode
-// Eliminates voice compression, telephone speech filtering, and robotic distortion.
+// High-Fidelity Audio SDP Negotiation for WebRTC
+// Configures Opus for broadcast-grade 48kHz Stereo with In-Band FEC enabled.
+// Eliminates packet-loss corruption clicks, buffer congestion, and robotic voice compression.
 
 export function configureHighFidelityAudioSDP(sdp) {
   if (!sdp || typeof sdp !== 'string') return sdp;
 
   let modified = sdp;
 
-  // 1. Remove voice comfort noise
+  // 1. Remove voice comfort noise to prevent volume pumping during musical pauses
   modified = modified.replace(/a=rtpmap:(\d+)\s+CN\/[^\r\n]+[\r\n]+/gi, '');
 
   // 2. Locate Opus codec payload type (standard is 111)
@@ -16,14 +16,13 @@ export function configureHighFidelityAudioSDP(sdp) {
     const pt = opusMatch[1];
     const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+([^\\r\\n]+)`, 'i');
 
-    // Studio Quality Parameters:
+    // Broadcast High-Fidelity Stereo Parameters:
     // - stereo=1: Full stereo channel decoding
     // - sprop-stereo=1: Signal stereo capabilities in SDP
-    // - maxaveragebitrate=256000: Studio 256kbps bit-rate (vs default 32kbps speech)
+    // - maxaveragebitrate=128000: Broadcast standard 128kbps stereo (transparent music fidelity, prevents Wi-Fi buffer congestion)
     // - maxplaybackrate=48000: Full 48kHz frequency spectrum
-    // - cbr=1: Constant bitrate for jitter-free packet spacing
-    // - useinbandfec=0: Disable voice forward error correction for pristine musical transients
-    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=256000;maxplaybackrate=48000;cbr=1;useinbandfec=0';
+    // - useinbandfec=1: CRITICAL: In-Band Forward Error Correction seamlessly heals dropped Wi-Fi packets without audio corruption clicks!
+    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=128000;maxplaybackrate=48000;useinbandfec=1';
 
     if (fmtpRegex.test(modified)) {
       modified = modified.replace(fmtpRegex, (match, existing) => {
@@ -44,7 +43,7 @@ export function configureHighFidelityAudioSDP(sdp) {
 }
 
 // Automatically monkey-patch RTCPeerConnection once on load
-// Ensures all PeerJS and WebRTC calls universally transmit 256kbps Hi-Fi stereo music
+// Ensures all PeerJS and WebRTC calls universally transmit pristine Hi-Fi stereo music
 if (typeof window !== 'undefined' && window.RTCPeerConnection) {
   const origSetLocalDescription = window.RTCPeerConnection.prototype.setLocalDescription;
   window.RTCPeerConnection.prototype.setLocalDescription = function (desc) {
@@ -64,5 +63,5 @@ if (typeof window !== 'undefined' && window.RTCPeerConnection) {
     }
     return origSetLocalDescription.apply(this, arguments);
   };
-  console.log('[WebRTC] Studio Hi-Fi Stereo Audio SDP interceptor active (256kbps 48kHz Opus)');
+  console.log('[WebRTC] Hi-Fi Stereo Audio SDP interceptor active (128kbps 48kHz Opus with In-Band FEC)');
 }

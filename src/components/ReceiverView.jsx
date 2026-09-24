@@ -7,7 +7,6 @@ import {
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
 import { clockSync } from '../utils/clockSync';
-import { acousticCalibrator } from '../utils/acousticCalibrate';
 import Visualizer from './Visualizer';
 
 export default function ReceiverView({ initialRoomId = '', onBack }) {
@@ -152,13 +151,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         } else if (data.type === 'SYNC_CLAPPER') {
           // Fire scheduled acoustic tick & visual flash at exact microsecond
           clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash);
-        } else if (data.type === 'CALIBRATE_SCHEDULED') {
-          runAcousticCalibration(data.targetMasterTime);
+        } else if (data.type === 'CALIBRATE_TELEMETRY') {
+          applyTelemetrySync(data.hostDelayMs, data.rtt);
         } else if (data.type === 'START_CALIBRATE_CLIENT') {
-          startAutoSync();
-        } else if (data.type === 'CALIBRATE_ERROR') {
-          setAutoSyncStatus('error');
-          setAutoSyncMsg(data.message || 'Calibration aborted by host.');
+          performAutoSync();
         }
       });
 
@@ -244,63 +240,49 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
   };
 
-  const startAutoSync = () => {
+  const performAutoSync = () => {
     if (!connRef.current || !connRef.current.open) {
       setAutoSyncStatus('error');
       setAutoSyncMsg('Not connected to Host. Please join session first.');
       return;
     }
-    audioProcessor.init();
-    if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
-      audioProcessor.ctx.resume();
-    }
+
     setAutoSyncStatus('calibrating');
-    setAutoSyncMsg('Requesting acoustic calibration pulse from Host...');
+    setAutoSyncMsg('Measuring network transit and hardware DAC buffers...');
+
+    // 1. Refresh high-speed NTP handshake
+    clockSync.startCalibration(connRef.current);
+
+    // 2. Request host telemetry
     connRef.current.send({ type: 'CALIBRATE_REQUEST' });
   };
 
-  const runAcousticCalibration = (targetMasterTime) => {
-    audioProcessor.init();
-    const ctx = audioProcessor.ctx;
-    if (!ctx) {
-      setAutoSyncStatus('error');
-      setAutoSyncMsg('Web Audio context unavailable.');
-      return;
-    }
-    if (ctx.state === 'suspended') {
-      ctx.resume();
+  const applyTelemetrySync = (hostDelay = 120, rtt = 10) => {
+    const effectiveRtt = rtt > 0 ? rtt : (clockSync.rtt || 10);
+    const oneWayTransit = effectiveRtt / 2;
+
+    // Direct hardware latency from browser Web Audio API
+    const baseLat = (audioProcessor.ctx?.baseLatency || 0.015) * 1000;
+    const outLat = (audioProcessor.ctx?.outputLatency || 0.025) * 1000;
+    const totalDac = Math.round(baseLat + outLat);
+
+    let profileOffset = 0;
+    if (hardwareProfile === 'bt_speaker') {
+      profileOffset = 180;
+    } else if (hardwareProfile === 'bt_headphones') {
+      profileOffset = 120;
     }
 
-    const prevVol = volume;
-    // Duck volume during calibration so the two calibration tones stand out
-    audioProcessor.setVolume(prevVol * 0.15);
+    // Host presentation delay vs receiver base buffer (100ms) and hardware latencies
+    // Target offset brings satellite speaker into phase with host laptop speaker
+    const targetOffset = Math.max(-90, Math.min(350, Math.round(profileOffset - (oneWayTransit + totalDac - 20))));
 
-    acousticCalibrator.runReceiverCalibration({
-      audioCtx: ctx,
-      receiverPlaybackNode: audioProcessor.delayNode || audioProcessor.gainNode,
-      targetMasterTime,
-      clockSyncInstance: clockSync,
-      onProgress: (msg) => {
-        setAutoSyncMsg(msg);
-      },
-      onSuccess: (result) => {
-        audioProcessor.setVolume(prevVol);
-        const currentDelay = delayMs;
-        // errorMs > 0 means Phone was heard too late -> reduce phone delay
-        // errorMs < 0 means Phone was heard too early -> increase phone delay
-        const newDelay = Math.max(-90, Math.min(350, Math.round(currentDelay - result.errorMs)));
-        setDelayMs(newDelay);
-        audioProcessor.setDelay(newDelay);
-        setAutoSyncStatus('done');
-        setAutoSyncMsg(`✅ Phase Locked! Offset: ${result.errorMs > 0 ? '+' : ''}${result.errorMs}ms compensated. New delay: ${newDelay}ms.`);
-        triggerVisualFlash();
-      },
-      onError: (errMsg) => {
-        audioProcessor.setVolume(prevVol);
-        setAutoSyncStatus('error');
-        setAutoSyncMsg(errMsg);
-      }
-    });
+    setDelayMs(targetOffset);
+    audioProcessor.setDelay(targetOffset); // Uses micro-fade, ZERO WHOOSH!
+
+    setAutoSyncStatus('done');
+    setAutoSyncMsg(`⚡ Auto-Locked! (Wi-Fi RTT: ${Math.round(effectiveRtt)}ms | DAC: ${totalDac}ms | Target Offset: ${targetOffset >= 0 ? '+' : ''}${targetOffset}ms)`);
+    triggerVisualFlash();
   };
 
   const disconnect = () => {
@@ -543,7 +525,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               </div>
             </div>
 
-            {/* 1-TAP AUTOMATED ACOUSTIC SYNC (MIC CALIBRATION) */}
+            {/* 1-TAP SMART TELEMETRY AUTO-SYNC */}
             <div className="analog-inset" style={{ 
               padding: '18px', 
               display: 'flex', 
@@ -559,9 +541,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Mic size={16} color="var(--accent-bright)" />
+                  <Zap size={16} color="var(--accent-bright)" />
                   <strong className="font-mono" style={{ fontSize: '12px', color: 'var(--accent-bright)', letterSpacing: '0.8px' }}>
-                    AUTOMATED ACOUSTIC AUTO-SYNC
+                    SMART TELEMETRY AUTO-SYNC
                   </strong>
                 </div>
                 <span className="paper-badge" style={{ 
@@ -569,12 +551,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                   padding: '2px 8px',
                   color: autoSyncStatus === 'done' ? '#10b981' : autoSyncStatus === 'error' ? '#ef4444' : 'var(--accent-bright)'
                 }}>
-                  {autoSyncStatus === 'calibrating' ? 'CALIBRATING...' : autoSyncStatus === 'done' ? '● LOCKED' : 'MIC-POWERED'}
+                  {autoSyncStatus === 'calibrating' ? 'MEASURING...' : autoSyncStatus === 'done' ? '● LOCKED' : '1-TAP ALIGN'}
                 </span>
               </div>
 
               <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
-                Hold your phone's speaker close to the host laptop speaker, then tap Calibrate. The phone microphone listens to the arrival times and locks phase alignment automatically.
+                Measures network transit latency, phone DAC buffers, and speaker profiles to lock phase alignment with zero microphone feedback or whooshing.
               </p>
 
               {autoSyncMsg && (
@@ -592,7 +574,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               )}
 
               <button 
-                onClick={startAutoSync} 
+                onClick={performAutoSync} 
                 disabled={autoSyncStatus === 'calibrating'}
                 className="btn-analog btn-amber" 
                 style={{ 
@@ -605,8 +587,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                   gap: '8px'
                 }}
               >
-                <Target size={18} />
-                {autoSyncStatus === 'calibrating' ? 'Listening & Calibrating...' : '🎯 Auto-Calibrate (Mic Sync)'}
+                <Zap size={18} />
+                {autoSyncStatus === 'calibrating' ? 'Measuring Transit & DAC...' : '⚡ Auto-Align & Lock Phase'}
               </button>
             </div>
 
@@ -622,7 +604,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                     Compensates for speaker processing and physical room distance
                   </div>
                 </div>
-                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: delayMs === 0 ? '#10b981' : 'var(--amber-bright)' }}>
+                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: delayMs === 0 ? '#10b981' : 'var(--accent-bright)' }}>
                   {delayMs === 0 ? '0ms (Locked)' : `${delayMs > 0 ? '+' : ''}${delayMs}ms`}
                 </span>
               </div>

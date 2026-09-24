@@ -1,6 +1,6 @@
 // Universal Studio Synced Audio Processor for PartySync
-// Clean, distortion-free full-range stereo playback with soft-knee limiter
-import './sdp'; // Ensures 256kbps Studio Hi-Fi Opus SDP negotiation on all WebRTC calls
+// Clean, distortion-free full-range stereo playback with soft-knee limiter & pop-free micro-fading
+import './sdp'; // Ensures Hi-Fi Opus SDP negotiation on all WebRTC calls
 
 class SyncedAudioProcessor {
   constructor() {
@@ -12,6 +12,7 @@ class SyncedAudioProcessor {
     this.analyserNode = null;
     this.delayMs = 0;
     this.baseBufferMs = 100; // 100ms base buffer allows clean -90ms to +350ms delay adjustments (ideal for Bluetooth)
+    this.currentVolume = 1.0;
   }
 
   init() {
@@ -37,7 +38,7 @@ class SyncedAudioProcessor {
       this.delayNode.delayTime.setValueAtTime(initialDelay, this.ctx.currentTime);
 
       this.gainNode = this.ctx.createGain();
-      this.gainNode.gain.setValueAtTime(1.0, this.ctx.currentTime);
+      this.gainNode.gain.setValueAtTime(this.currentVolume, this.ctx.currentTime);
 
       // Studio Master Limiter / Compressor: Prevents digital 0dBFS clipping on phone speakers
       this.compressorNode = this.ctx.createDynamicsCompressor();
@@ -64,18 +65,40 @@ class SyncedAudioProcessor {
     }
   }
 
-  setDelay(ms) {
+  /**
+   * Set delay with a micro-crossfade.
+   * Completely eliminates Doppler pitch-bending / flanging / jet-engine "whoosh" sound!
+   */
+  setDelay(ms, instant = false) {
     this.delayMs = Math.max(-90, Math.min(400, ms));
     if (this.delayNode && this.ctx) {
       const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
-      // Smooth 50ms ramp to avoid clicks or pops when adjusting
-      this.delayNode.delayTime.setTargetAtTime(effectiveSec, this.ctx.currentTime, 0.05);
+
+      if (instant || !this.gainNode || this.ctx.state !== 'running') {
+        this.delayNode.delayTime.setValueAtTime(effectiveSec, this.ctx.currentTime);
+        return;
+      }
+
+      // Micro-crossfade: ramp gain down over 15ms, snap delay instantly, ramp gain back up over 15ms.
+      // This mathematically guarantees zero pitch-bending / whooshing during delay shifts!
+      const now = this.ctx.currentTime;
+      const targetGain = this.currentVolume;
+
+      this.gainNode.gain.cancelScheduledValues(now);
+      this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+      this.gainNode.gain.linearRampToValueAtTime(0.001, now + 0.015);
+
+      this.delayNode.delayTime.setValueAtTime(effectiveSec, now + 0.018);
+
+      this.gainNode.gain.setValueAtTime(0.001, now + 0.020);
+      this.gainNode.gain.linearRampToValueAtTime(targetGain, now + 0.035);
     }
   }
 
   setVolume(vol) {
+    this.currentVolume = Math.max(0, Math.min(2, vol));
     if (this.gainNode && this.ctx) {
-      this.gainNode.gain.setValueAtTime(Math.max(0, Math.min(2, vol)), this.ctx.currentTime);
+      this.gainNode.gain.setValueAtTime(this.currentVolume, this.ctx.currentTime);
     }
   }
 

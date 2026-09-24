@@ -7,7 +7,6 @@ import {
   Zap, Clock, Wifi, Info, BellRing, Target
 } from 'lucide-react';
 import { clockSync, ClockSynchronizer } from '../utils/clockSync';
-import { AcousticCalibrator } from '../utils/acousticCalibrate';
 import Visualizer from './Visualizer';
 
 export default function HostView({ onBack }) {
@@ -163,35 +162,14 @@ export default function HostView({ onBack }) {
     clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash);
   };
 
-  // Handle automated acoustic calibration request from satellite phone
+  // Respond to satellite auto-sync telemetry request
   const handleCalibrateRequest = (conn) => {
     if (!conn || !conn.open) return;
-    if (laptopMuted) {
-      conn.send({ 
-        type: 'CALIBRATE_ERROR', 
-        message: 'Host laptop speaker is muted. Unmute laptop speaker so phone can hear sync pulse.' 
-      });
-      return;
-    }
-
-    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
-    audioContextRef.current = ctx;
-    if (ctx.state === 'suspended') ctx.resume();
-
-    const targetMasterTime = clockSync.now() + 450;
-    conn.send({ type: 'CALIBRATE_SCHEDULED', targetMasterTime });
-
-    const delaySec = Math.max(0, (targetMasterTime - clockSync.now()) / 1000);
-    const triggerAudioTime = ctx.currentTime + delaySec;
-
-    // Temporarily duck music on host laptop if playing
-    if (hostGainNodeRef.current && !laptopMuted) {
-      hostGainNodeRef.current.gain.setValueAtTime(0.12, triggerAudioTime - 0.05);
-      hostGainNodeRef.current.gain.linearRampToValueAtTime(1.0, triggerAudioTime + 0.85);
-    }
-
-    // Play Host calibration beep (2400Hz) through host delay node so it matches music delay!
-    AcousticCalibrator.playHostBeep(ctx, hostDelayNodeRef.current || ctx.destination, triggerAudioTime);
+    conn.send({ 
+      type: 'CALIBRATE_TELEMETRY', 
+      hostDelayMs: hostDelayMs,
+      rtt: clockSync.rtt || 0 
+    });
     triggerVisualFlash();
   };
 
