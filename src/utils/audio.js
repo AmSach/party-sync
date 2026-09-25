@@ -29,6 +29,15 @@ class SyncedAudioProcessor {
     this.init();
     this.disconnect();
 
+    if (!mediaStream || mediaStream.getAudioTracks().length === 0) {
+      console.warn('[AudioProcessor] setupStream called with null or empty stream');
+      return;
+    }
+
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+
     try {
       // Ensure browser treats stream as music (disables telephone speech filtering)
       mediaStream.getAudioTracks().forEach(track => {

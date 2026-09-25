@@ -42,6 +42,7 @@ export default function HostView({ onBack }) {
   const [isMetronomeActive, setIsMetronomeActive] = useState(false);
   const analyserRef = useRef(null);
   const activeConnectionsRef = useRef(new Map());
+  const activeMediaCallsRef = useRef(new Map()); // peerId -> MediaConnection
   const activeMediaTitleRef = useRef('No audio source selected');
 
   useEffect(() => {
@@ -111,12 +112,7 @@ export default function HostView({ onBack }) {
 
         // If audio stream is already playing, immediately pipe to new satellite
         if (audioStreamRef.current && peerRef.current) {
-          console.log(`[Host] Piping active stream to new satellite: ${conn.peer}`);
-          try {
-            peerRef.current.call(conn.peer, audioStreamRef.current);
-          } catch (e) {
-            console.error('[Host] Call error:', e);
-          }
+          callPeerWithStream(conn.peer, audioStreamRef.current);
         }
       });
 
@@ -190,6 +186,33 @@ export default function HostView({ onBack }) {
     }
   };
 
+  const callPeerWithStream = (peerId, stream) => {
+    if (!peerRef.current || !peerRef.current.open || !stream) return;
+
+    const existingCall = activeMediaCallsRef.current.get(peerId);
+    if (existingCall && existingCall.open) {
+      console.log(`[Host] Media call already active for satellite ${peerId}`);
+      return;
+    }
+
+    console.log(`[Host] Calling satellite ${peerId} with pristine stereo music audio`);
+    try {
+      const call = peerRef.current.call(peerId, stream);
+      if (call) {
+        activeMediaCallsRef.current.set(peerId, call);
+        call.on('close', () => {
+          activeMediaCallsRef.current.delete(peerId);
+        });
+        call.on('error', (err) => {
+          console.warn(`[Host] Media call error for ${peerId}:`, err);
+          activeMediaCallsRef.current.delete(peerId);
+        });
+      }
+    } catch (err) {
+      console.error(`[Host] Error calling peer ${peerId}:`, err);
+    }
+  };
+
   const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('firefox');
 
   const startScreenCapture = async () => {
@@ -229,8 +252,13 @@ export default function HostView({ onBack }) {
       // Extract ONLY audio tracks to avoid wasting Wi-Fi bandwidth on video!
       const audioOnlyStream = new MediaStream(audioTracks);
 
-      // Stop video tracks immediately to save CPU and network bandwidth
-      mediaStream.getVideoTracks().forEach(t => t.stop());
+      // Listen for user ending screen capture via browser banner (without killing active session)
+      mediaStream.getVideoTracks().forEach(track => {
+        track.onended = () => {
+          console.log('[Host] Native screen capture ended by user');
+          stopBroadcasting(false);
+        };
+      });
 
       // Screen capture: Tab audio is SUPPRESSED (suppressLocalAudioPlayback=true).
       // Host plays through delayed Web Audio pipeline at configured host delay to sync with phones.
@@ -371,14 +399,7 @@ export default function HostView({ onBack }) {
 
     console.log(`[Host] Broadcasting Studio Hi-Fi Opus audio stream to ${activeConnectionsRef.current.size} satellites`);
     activeConnectionsRef.current.forEach((conn, peerId) => {
-      if (peerRef.current && peerRef.current.open) {
-        console.log(`[Host] Calling satellite ${peerId} with pristine stereo music audio`);
-        try {
-          peerRef.current.call(peerId, stream);
-        } catch (err) {
-          console.error(`[Host] Error calling peer ${peerId}:`, err);
-        }
-      }
+      callPeerWithStream(peerId, stream);
       if (conn.open) {
         conn.send({ type: 'AUDIO_STARTED', title: activeMediaTitleRef.current });
       }
@@ -510,6 +531,11 @@ export default function HostView({ onBack }) {
       try { hostGainNodeRef.current.disconnect(); } catch (e) {}
       hostGainNodeRef.current = null;
     }
+
+    activeMediaCallsRef.current.forEach(call => {
+      try { call.close(); } catch (e) {}
+    });
+    activeMediaCallsRef.current.clear();
 
     activeConnectionsRef.current.forEach(conn => {
       if (conn.open) conn.send({ type: 'AUDIO_STOPPED' });

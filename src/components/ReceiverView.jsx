@@ -185,28 +185,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     });
 
     peer.on('call', (call) => {
-      // Close previous call to prevent duplicate streams/audio duplication!
-      if (activeCallRef.current && activeCallRef.current !== call) {
-        try { activeCallRef.current.close(); } catch (e) {}
-      }
-      activeCallRef.current = call;
-
-      console.log('[Receiver] Answering audio pipe with Studio Hi-Fi Opus...');
+      console.log('[Receiver] Answering incoming audio stream from Host...');
       call.answer();
-
-      // Optimize WebRTC receiver for minimal buffering latency
-      if (call.peerConnection) {
-        try {
-          call.peerConnection.getReceivers().forEach(receiver => {
-            if ('playoutDelayHint' in receiver) {
-              receiver.playoutDelayHint = 0;
-            }
-            if ('jitterBufferTarget' in receiver) {
-              receiver.jitterBufferTarget = 0;
-            }
-          });
-        } catch (e) {}
-      }
 
       call.on('stream', (remoteAudioStream) => {
         console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
@@ -225,11 +205,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       });
 
       call.on('close', () => {
-        if (activeCallRef.current === call) {
-          activeCallRef.current = null;
-          setIsAudioActive(false);
-          setStatusText('Audio Feed Stopped');
-        }
+        setIsAudioActive(false);
+        setStatusText('Audio Feed Stopped');
+      });
+
+      call.on('error', (err) => {
+        console.warn('[Receiver] Media call error:', err);
       });
     });
 
