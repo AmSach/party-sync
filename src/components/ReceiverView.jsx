@@ -27,7 +27,6 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const wakeLockRef = useRef(null);
-  const audioElRef = useRef(null);
   const webrtcStreamRef = useRef(null);
 
   const requestWakeLock = async () => {
@@ -183,13 +182,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         // Route audio through Web Audio API (uncompressed bit-perfect 48kHz)
         audioProcessor.setupStream(remoteAudioStream);
 
-        // Hidden <audio> element is muted & volume 0 to prevent dual playback comb filtering
-        if (audioElRef.current) {
-          audioElRef.current.srcObject = remoteAudioStream;
-          audioElRef.current.muted = true;
-          audioElRef.current.volume = 0;
-          audioElRef.current.play().catch(e => console.log('Audio element play notice:', e));
-        }
+        // CRITICAL: Do NOT use an <audio> element to play the stream!
+        // The <audio> element bypasses the Web Audio API DelayNode pipeline entirely,
+        // rendering the delay slider and auto-sync completely inaudible.
+        // All audio MUST flow through: sourceNode → delayNode → gainNode → ctx.destination
 
         setIsAudioActive(true);
         setStatusText('● Live Synchronized Studio Playout');
@@ -731,8 +727,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
       </div>
       
-      {/* Hidden Muted Audio Element to Keep Mobile Browser Audio Session Active */}
-      <audio ref={audioElRef} autoPlay playsInline muted style={{ display: 'none' }} />
+      {/* NO hidden <audio> element! Audio plays ONLY through the Web Audio API DelayNode pipeline.
+          An <audio> element would bypass the delay chain and play raw undelayed WebRTC audio. */}
     </div>
   );
 }

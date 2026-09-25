@@ -58,7 +58,9 @@ class SyncedAudioProcessor {
       this.gainNode.connect(this.ctx.destination);
       this.gainNode.connect(this.analyserNode);
 
-      console.log('[AudioProcessor] Pure Hi-Fi Stereo Audio pipeline connected (48kHz Uncompressed)');
+      console.log(`[AudioProcessor] ✅ Hi-Fi Pipeline CONNECTED | ctx.state=${this.ctx.state} | sampleRate=${this.ctx.sampleRate} | baseLatency=${(this.ctx.baseLatency * 1000).toFixed(1)}ms | outputLatency=${((this.ctx.outputLatency || 0) * 1000).toFixed(1)}ms | initialDelay=${(initialDelay * 1000).toFixed(1)}ms | volume=${this.currentVolume}`);
+      console.log(`[AudioProcessor] Nodes: source=${!!this.sourceNode} delay=${!!this.delayNode} gain=${!!this.gainNode} analyser=${!!this.analyserNode}`);
+      console.log(`[AudioProcessor] Stream tracks: ${mediaStream.getAudioTracks().map(t => `${t.label} (${t.readyState}, hint=${t.contentHint})`).join(', ')}`);
     } catch (err) {
       console.error('[AudioProcessor] setupStream error:', err);
     }
@@ -71,32 +73,50 @@ class SyncedAudioProcessor {
    */
   setDelay(ms, isDiscreteJump = false) {
     this.delayMs = Math.max(-90, Math.min(400, ms));
-    if (this.delayNode && this.ctx) {
-      const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
+    
+    const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
+    
+    console.log(`[AudioProcessor] setDelay(${ms}ms, discrete=${isDiscreteJump}) → effective=${(effectiveSec * 1000).toFixed(1)}ms | ctx=${!!this.ctx} state=${this.ctx?.state} | delayNode=${!!this.delayNode} | gainNode=${!!this.gainNode}`);
+    
+    if (!this.delayNode || !this.ctx) {
+      console.warn('[AudioProcessor] setDelay SKIPPED — delayNode or ctx is null!');
+      return;
+    }
 
-      if (!this.gainNode || this.ctx.state !== 'running') {
-        this.delayNode.delayTime.setValueAtTime(effectiveSec, this.ctx.currentTime);
-        return;
-      }
+    // Ensure AudioContext is running (mobile browsers suspend it)
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume().then(() => {
+        console.log('[AudioProcessor] AudioContext resumed from suspended state');
+      });
+    }
 
-      if (isDiscreteJump) {
-        // Micro-crossfade for large button jumps (+50ms, reset, profile switch)
-        const now = this.ctx.currentTime;
-        const targetGain = this.currentVolume;
+    if (!this.gainNode || this.ctx.state !== 'running') {
+      this.delayNode.delayTime.setValueAtTime(effectiveSec, this.ctx.currentTime);
+      console.log(`[AudioProcessor] setDelay applied via setValueAtTime (ctx not running or no gainNode)`);
+      return;
+    }
 
-        this.gainNode.gain.cancelScheduledValues(now);
-        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-        this.gainNode.gain.linearRampToValueAtTime(0.01, now + 0.012);
+    if (isDiscreteJump) {
+      // Micro-crossfade for large button jumps (+50ms, reset, profile switch)
+      const now = this.ctx.currentTime;
+      const targetGain = this.currentVolume;
 
-        this.delayNode.delayTime.setValueAtTime(effectiveSec, now + 0.015);
+      this.gainNode.gain.cancelScheduledValues(now);
+      this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+      this.gainNode.gain.linearRampToValueAtTime(0.01, now + 0.012);
 
-        this.gainNode.gain.setValueAtTime(0.01, now + 0.018);
-        this.gainNode.gain.linearRampToValueAtTime(targetGain, now + 0.030);
-      } else {
-        // Continuous slider drag: smooth real-time parameter tracking WITHOUT muting!
-        // You hear the audio shift immediately as your finger moves.
-        this.delayNode.delayTime.setTargetAtTime(effectiveSec, this.ctx.currentTime, 0.025);
-      }
+      this.delayNode.delayTime.setValueAtTime(effectiveSec, now + 0.015);
+
+      this.gainNode.gain.setValueAtTime(0.01, now + 0.018);
+      this.gainNode.gain.linearRampToValueAtTime(targetGain, now + 0.030);
+      
+      console.log(`[AudioProcessor] setDelay applied via micro-crossfade, target=${effectiveSec.toFixed(4)}s`);
+    } else {
+      // Continuous slider drag: smooth real-time parameter tracking WITHOUT muting!
+      // You hear the audio shift immediately as your finger moves.
+      this.delayNode.delayTime.setTargetAtTime(effectiveSec, this.ctx.currentTime, 0.025);
+      
+      console.log(`[AudioProcessor] setDelay applied via setTargetAtTime, target=${effectiveSec.toFixed(4)}s`);
     }
   }
 
