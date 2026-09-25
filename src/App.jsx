@@ -181,7 +181,7 @@ export default function App() {
           fontFamily: 'monospace',
           letterSpacing: '0.5px'
         }}>
-          PARTYSYNC MESH AUDIO • 128KBPS OPUS HI-FI • SMART PHASE SYNC
+          PARTYSYNC MESH AUDIO • 192KBPS OPUS HI-FI • SMART PHASE SYNC
         </footer>
 
       </div>

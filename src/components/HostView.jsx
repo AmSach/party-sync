@@ -166,10 +166,8 @@ export default function HostView({ onBack }) {
       }
     });
 
-    // 2. Play scheduled acoustic pulse through Host delay pipeline (or destination) and trigger flash
-    const destNode = (!laptopMuted && hostDelayNodeRef.current) 
-      ? hostDelayNodeRef.current 
-      : ctx.destination;
+    // 2. Play scheduled acoustic pulse through Host delay pipeline only if laptop speakers are unmuted
+    const destNode = laptopMuted ? null : (hostDelayNodeRef.current || 'default');
     clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash, destNode);
   };
 
@@ -235,10 +233,7 @@ export default function HostView({ onBack }) {
       mediaStream.getVideoTracks().forEach(t => t.stop());
 
       // Screen capture: Tab audio is SUPPRESSED (suppressLocalAudioPlayback=true).
-      // Host plays through delayed Web Audio pipeline to sync with phones.
-      // 300ms delay matches typical WebRTC transit (encode + network + jitter + decode).
-      setHostDelayMs(300);
-      hostDelayMsRef.current = 300;
+      // Host plays through delayed Web Audio pipeline at configured host delay to sync with phones.
       setLaptopMuted(false);
       setupHostAudio(audioOnlyStream, false); // false = DON'T mute host, play through delayed pipeline
     } catch (err) {
@@ -501,6 +496,19 @@ export default function HostView({ onBack }) {
     if (audioStreamRef.current) {
       audioStreamRef.current.getTracks().forEach(t => t.stop());
       audioStreamRef.current = null;
+    }
+
+    if (hostSourceNodeRef.current) {
+      try { hostSourceNodeRef.current.disconnect(); } catch (e) {}
+      hostSourceNodeRef.current = null;
+    }
+    if (hostDelayNodeRef.current) {
+      try { hostDelayNodeRef.current.disconnect(); } catch (e) {}
+      hostDelayNodeRef.current = null;
+    }
+    if (hostGainNodeRef.current) {
+      try { hostGainNodeRef.current.disconnect(); } catch (e) {}
+      hostGainNodeRef.current = null;
     }
 
     activeConnectionsRef.current.forEach(conn => {

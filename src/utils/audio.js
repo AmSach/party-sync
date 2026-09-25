@@ -103,7 +103,15 @@ class SyncedAudioProcessor {
   setVolume(vol) {
     this.currentVolume = Math.max(0, Math.min(2, vol));
     if (this.gainNode && this.ctx) {
-      this.gainNode.gain.setValueAtTime(this.currentVolume, this.ctx.currentTime);
+      try {
+        const now = this.ctx.currentTime;
+        this.gainNode.gain.cancelScheduledValues(0);
+        this.gainNode.gain.setValueAtTime(this.currentVolume, now);
+      } catch (e) {
+        try {
+          this.gainNode.gain.value = this.currentVolume;
+        } catch (err) {}
+      }
     }
   }
 
@@ -112,7 +120,6 @@ class SyncedAudioProcessor {
       this.sourceNode?.disconnect();
       this.delayNode?.disconnect();
       this.gainNode?.disconnect();
-      this.compressorNode?.disconnect();
       this.analyserNode?.disconnect();
     } catch (e) {
       // ignore

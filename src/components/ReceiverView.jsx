@@ -57,6 +57,14 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       setClockInfo(info);
     };
 
+    const unlockAudio = () => {
+      if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
+        audioProcessor.ctx.resume().catch(() => {});
+      }
+    };
+    window.addEventListener('click', unlockAudio);
+    window.addEventListener('touchstart', unlockAudio);
+
     const handleVisibilityChange = async () => {
       if (document.visibilityState === 'visible') {
         if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
@@ -71,6 +79,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       disconnect();
     };
@@ -164,6 +174,11 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         setIsConnected(false);
         setIsAudioActive(false);
         setStatusText('Host Transmitter Offline');
+      });
+
+      conn.on('error', (err) => {
+        console.warn('[Receiver] Data channel error:', err);
+        setStatusText('Connection interrupted. Reconnecting...');
       });
 
       connRef.current = conn;

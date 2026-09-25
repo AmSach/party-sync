@@ -24,8 +24,18 @@ class ClockSynchronizer {
     return new Promise((resolve) => {
       this._resolveCalibration = resolve;
       let count = 0;
+      let timer = null;
+
+      // Safety timeout: Never hang promise indefinitely if packets are lost
+      const timeout = setTimeout(() => {
+        if (timer) clearInterval(timer);
+        this.finalizeCalibration();
+      }, 1200);
+
       const sendPing = () => {
         if (count >= 8 || !conn.open) {
+          if (timer) clearInterval(timer);
+          clearTimeout(timeout);
           this.finalizeCalibration();
           return;
         }
@@ -35,9 +45,13 @@ class ClockSynchronizer {
       };
 
       // Burst 8 pings spaced by 35ms to find the cleanest network route
-      const interval = setInterval(() => {
+      timer = setInterval(() => {
         sendPing();
-        if (count >= 8) clearInterval(interval);
+        if (count >= 8) {
+          clearInterval(timer);
+          clearTimeout(timeout);
+          this.finalizeCalibration();
+        }
       }, 35);
     });
   }
@@ -72,7 +86,13 @@ class ClockSynchronizer {
   }
 
   finalizeCalibration() {
-    if (this.samples.length === 0) return;
+    if (this.samples.length === 0) {
+      if (this._resolveCalibration) {
+        this._resolveCalibration({ rtt: 10, offset: this.clockOffset });
+        this._resolveCalibration = null;
+      }
+      return;
+    }
 
     // Filter by minimum RTT (cleanest packet without Wi-Fi queuing delay)
     this.samples.sort((a, b) => a.rtt - b.rtt);
@@ -106,37 +126,44 @@ class ClockSynchronizer {
   }
 
   // Schedule an acoustic and visual Sync Clapper tick at an exact future Master Time
-  playScheduledPulse(ctx, targetMasterTime, onVisualFlash, destinationNode = null) {
-    if (!ctx) return;
-    if (ctx.state === 'suspended') ctx.resume();
-
+  playScheduledPulse(ctx, targetMasterTime, onVisualFlash, destinationNode = 'default') {
     const localNow = this.now();
     const delaySec = Math.max(0, (targetMasterTime - localNow) / 1000);
 
-    const triggerAudioTime = ctx.currentTime + delaySec;
+    // Only play acoustic snap if destination is provided (allows silent visual-only flash when muted)
+    if (ctx && destinationNode !== null) {
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
 
-    try {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
+      const triggerAudioTime = ctx.currentTime + delaySec;
 
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(1400, triggerAudioTime); // Crisp 1400Hz snap
-      osc.frequency.exponentialRampToValueAtTime(300, triggerAudioTime + 0.02);
+      try {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
 
-      gain.gain.setValueAtTime(0.7, triggerAudioTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, triggerAudioTime + 0.02);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1400, triggerAudioTime); // Crisp 1400Hz snap
+        osc.frequency.exponentialRampToValueAtTime(300, triggerAudioTime + 0.02);
 
-      osc.connect(gain);
-      if (destinationNode) {
-        gain.connect(destinationNode);
-      } else {
-        gain.connect(ctx.destination);
+        gain.gain.setValueAtTime(0.7, triggerAudioTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, triggerAudioTime + 0.02);
+
+        osc.connect(gain);
+        const target = destinationNode === 'default' ? ctx.destination : destinationNode;
+        gain.connect(target);
+
+        osc.start(triggerAudioTime);
+        osc.stop(triggerAudioTime + 0.025);
+
+        // Memory cleanup: disconnect transient nodes after firing
+        setTimeout(() => {
+          try {
+            osc.disconnect();
+            gain.disconnect();
+          } catch (e) {}
+        }, (delaySec + 0.08) * 1000);
+      } catch (e) {
+        console.warn('[ClockSync] Audio pulse error:', e);
       }
-
-      osc.start(triggerAudioTime);
-      osc.stop(triggerAudioTime + 0.025);
-    } catch (e) {
-      console.warn('[ClockSync] Audio pulse error:', e);
     }
 
     // Trigger visual flash at the exact same millisecond
