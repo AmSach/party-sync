@@ -65,32 +65,38 @@ class SyncedAudioProcessor {
   }
 
   /**
-   * Set delay with a micro-crossfade.
-   * Completely eliminates Doppler pitch-bending / flanging / jet-engine "whoosh" sound!
+   * Set delay with smooth responsive tracking.
+   * Continuous slider dragging uses smooth parameter interpolation without muting.
+   * Discrete jumps use a micro-crossfade to eliminate pops.
    */
-  setDelay(ms, instant = false) {
+  setDelay(ms, isDiscreteJump = false) {
     this.delayMs = Math.max(-90, Math.min(400, ms));
     if (this.delayNode && this.ctx) {
       const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
 
-      if (instant || !this.gainNode || this.ctx.state !== 'running') {
+      if (!this.gainNode || this.ctx.state !== 'running') {
         this.delayNode.delayTime.setValueAtTime(effectiveSec, this.ctx.currentTime);
         return;
       }
 
-      // Micro-crossfade: ramp gain down over 15ms, snap delay instantly, ramp gain back up over 15ms.
-      // This mathematically guarantees zero pitch-bending / whooshing during delay shifts!
-      const now = this.ctx.currentTime;
-      const targetGain = this.currentVolume;
+      if (isDiscreteJump) {
+        // Micro-crossfade for large button jumps (+50ms, reset, profile switch)
+        const now = this.ctx.currentTime;
+        const targetGain = this.currentVolume;
 
-      this.gainNode.gain.cancelScheduledValues(now);
-      this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-      this.gainNode.gain.linearRampToValueAtTime(0.001, now + 0.015);
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+        this.gainNode.gain.linearRampToValueAtTime(0.01, now + 0.012);
 
-      this.delayNode.delayTime.setValueAtTime(effectiveSec, now + 0.018);
+        this.delayNode.delayTime.setValueAtTime(effectiveSec, now + 0.015);
 
-      this.gainNode.gain.setValueAtTime(0.001, now + 0.020);
-      this.gainNode.gain.linearRampToValueAtTime(targetGain, now + 0.035);
+        this.gainNode.gain.setValueAtTime(0.01, now + 0.018);
+        this.gainNode.gain.linearRampToValueAtTime(targetGain, now + 0.030);
+      } else {
+        // Continuous slider drag: smooth real-time parameter tracking WITHOUT muting!
+        // You hear the audio shift immediately as your finger moves.
+        this.delayNode.delayTime.setTargetAtTime(effectiveSec, this.ctx.currentTime, 0.025);
+      }
     }
   }
 

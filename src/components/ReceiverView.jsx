@@ -225,12 +225,12 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       offset = 0;
     }
     setDelayMs(offset);
-    audioProcessor.setDelay(offset);
+    audioProcessor.setDelay(offset, true);
   };
 
-  const handleNudgeChange = (ms) => {
+  const handleNudgeChange = (ms, isDiscrete = false) => {
     setDelayMs(ms);
-    audioProcessor.setDelay(ms);
+    audioProcessor.setDelay(ms, isDiscrete);
   };
 
   const handleVolumeChange = (vol) => {
@@ -667,7 +667,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 ].map(b => (
                   <button
                     key={b.label}
-                    onClick={() => handleNudgeChange(Math.max(-90, Math.min(350, b.val)))}
+                    onClick={() => handleNudgeChange(Math.max(-90, Math.min(350, b.val)), true)}
                     className="btn-analog"
                     style={{
                       padding: '6px 2px',
