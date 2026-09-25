@@ -7,10 +7,7 @@ export function configureHighFidelityAudioSDP(sdp) {
 
   let modified = sdp;
 
-  // 1. Remove voice comfort noise to prevent volume pumping during musical pauses
-  modified = modified.replace(/a=rtpmap:(\d+)\s+CN\/[^\r\n]+[\r\n]+/gi, '');
-
-  // 2. Locate Opus codec payload type (standard is 111)
+  // Locate Opus codec payload type (typically 111)
   const opusMatch = modified.match(/a=rtpmap:(\d+)\s+opus\/48000/i);
   if (opusMatch) {
     const pt = opusMatch[1];
@@ -19,10 +16,11 @@ export function configureHighFidelityAudioSDP(sdp) {
     // Broadcast High-Fidelity Stereo Parameters:
     // - stereo=1: Full stereo channel decoding
     // - sprop-stereo=1: Signal stereo capabilities in SDP
-    // - maxaveragebitrate=192000: Broadcast standard 192kbps stereo (transparent music fidelity)
+    // - maxaveragebitrate=256000: Broadcast standard 256kbps stereo (transparent music fidelity)
     // - maxplaybackrate=48000: Full 48kHz frequency spectrum
-    // - useinbandfec=1: CRITICAL: In-Band Forward Error Correction seamlessly heals dropped Wi-Fi packets without audio corruption clicks!
-    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=192000;maxplaybackrate=48000;useinbandfec=1';
+    // - useinbandfec=1: Seamlessly heals dropped Wi-Fi packets without audio corruption clicks
+    // - cbr=1: Constant bitrate for consistent high quality
+    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=256000;maxplaybackrate=48000;useinbandfec=1;cbr=1';
 
     if (fmtpRegex.test(modified)) {
       modified = modified.replace(fmtpRegex, (match, existing) => {
@@ -50,18 +48,19 @@ if (typeof window !== 'undefined' && window.RTCPeerConnection) {
     if (desc && desc.sdp) {
       try {
         const modifiedSdp = configureHighFidelityAudioSDP(desc.sdp);
-        // Modern RTCSessionDescription has read-only sdp getter in strict mode.
-        // Construct a new RTCSessionDescription / object to pass to native setLocalDescription.
         const newDesc = typeof window.RTCSessionDescription === 'function'
           ? new window.RTCSessionDescription({ type: desc.type, sdp: modifiedSdp })
           : { type: desc.type, sdp: modifiedSdp };
 
-        return origSetLocalDescription.call(this, newDesc);
+        return origSetLocalDescription.call(this, newDesc).catch((err) => {
+          console.warn('[WebRTC] Modified SDP rejected, falling back to native SDP:', err);
+          return origSetLocalDescription.apply(this, arguments);
+        });
       } catch (e) {
         console.warn('[WebRTC] SDP modification failed, using original description:', e);
       }
     }
     return origSetLocalDescription.apply(this, arguments);
   };
-  console.log('[WebRTC] Hi-Fi Stereo Audio SDP interceptor active (128kbps 48kHz Opus with In-Band FEC)');
+  console.log('[WebRTC] Hi-Fi Stereo Audio SDP interceptor active (256kbps 48kHz Opus with In-Band FEC)');
 }

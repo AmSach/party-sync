@@ -7,6 +7,7 @@ import {
   Zap, Clock, Wifi, Info, BellRing, Target
 } from 'lucide-react';
 import { clockSync, ClockSynchronizer } from '../utils/clockSync';
+import { configureHighFidelityAudioSDP } from '../utils/sdp';
 import Visualizer from './Visualizer';
 
 export default function HostView({ onBack }) {
@@ -180,9 +181,8 @@ export default function HostView({ onBack }) {
       }
     });
 
-    // 2. Play scheduled acoustic pulse through Host delay pipeline only if laptop speakers are unmuted
-    const destNode = laptopMuted ? null : (hostDelayNodeRef.current || 'default');
-    clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash, destNode);
+    // 2. Play scheduled acoustic pulse directly to Host speakers so user can audibly verify alignment
+    clockSync.playScheduledPulse(ctx, targetMasterTime, triggerVisualFlash, 'default');
   };
 
   // Respond to satellite auto-sync telemetry request
@@ -217,7 +217,7 @@ export default function HostView({ onBack }) {
 
     console.log(`[Host] Calling satellite ${peerId} with audio stream`);
     try {
-      const call = peerRef.current.call(peerId, stream);
+      const call = peerRef.current.call(peerId, stream, { sdpTransform: configureHighFidelityAudioSDP });
       if (call) {
         activeMediaCallsRef.current.set(peerId, call);
         call.on('close', () => {

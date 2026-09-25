@@ -21,8 +21,16 @@ class SyncedAudioProcessor {
       this.ctx = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
     }
     if (this.ctx.state === 'suspended') {
-      this.ctx.resume();
+      this.ctx.resume().catch(() => {});
     }
+    // Mobile unlock: play a 1-sample silent buffer to unlock audio hardware pipeline
+    try {
+      const buffer = this.ctx.createBuffer(1, 1, 22050);
+      const source = this.ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.ctx.destination);
+      source.start(0);
+    } catch (e) {}
   }
 
   setupStream(mediaStream) {
@@ -36,6 +44,25 @@ class SyncedAudioProcessor {
 
     if (this.ctx && this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
+    }
+
+    // CRITICAL: In Chromium and Firefox, remote WebRTC MediaStreams require an active HTMLAudioElement
+    // to pull RTP packets from the network into the browser's decoding engine.
+    // Without this, createMediaStreamSource receives pure silence!
+    // The element MUST be permanently muted & volume 0 so it never produces double playback.
+    if (typeof Audio !== 'undefined') {
+      try {
+        if (!this.streamActivator) {
+          this.streamActivator = new Audio();
+          this.streamActivator.autoplay = true;
+          this.streamActivator.muted = true;
+          this.streamActivator.volume = 0;
+        }
+        this.streamActivator.srcObject = mediaStream;
+        this.streamActivator.play().catch(() => {});
+      } catch (e) {
+        console.warn('[AudioProcessor] Stream activator notice:', e);
+      }
     }
 
     try {
@@ -130,6 +157,10 @@ class SyncedAudioProcessor {
       this.delayNode?.disconnect();
       this.gainNode?.disconnect();
       this.analyserNode?.disconnect();
+      if (this.streamActivator) {
+        this.streamActivator.pause();
+        this.streamActivator.srcObject = null;
+      }
     } catch (e) {
       // ignore
     }

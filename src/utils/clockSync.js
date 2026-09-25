@@ -130,8 +130,14 @@ class ClockSynchronizer {
     const localNow = this.now();
     const delaySec = Math.max(0, (targetMasterTime - localNow) / 1000);
 
-    // Only play acoustic snap if destination is provided (allows silent visual-only flash when muted)
-    if (ctx && destinationNode !== null) {
+    if (!ctx && typeof window !== 'undefined') {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        try { ctx = new AudioCtx({ latencyHint: 'interactive' }); } catch (e) {}
+      }
+    }
+
+    if (ctx) {
       if (ctx.state === 'suspended') ctx.resume().catch(() => {});
 
       const triggerAudioTime = ctx.currentTime + delaySec;
@@ -144,11 +150,11 @@ class ClockSynchronizer {
         osc.frequency.setValueAtTime(1400, triggerAudioTime); // Crisp 1400Hz snap
         osc.frequency.exponentialRampToValueAtTime(300, triggerAudioTime + 0.02);
 
-        gain.gain.setValueAtTime(0.7, triggerAudioTime);
+        gain.gain.setValueAtTime(0.8, triggerAudioTime);
         gain.gain.exponentialRampToValueAtTime(0.001, triggerAudioTime + 0.02);
 
         osc.connect(gain);
-        const target = destinationNode === 'default' ? ctx.destination : destinationNode;
+        const target = (destinationNode === 'default' || !destinationNode) ? ctx.destination : destinationNode;
         gain.connect(target);
 
         osc.start(triggerAudioTime);

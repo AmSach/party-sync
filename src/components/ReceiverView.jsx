@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
 import { clockSync } from '../utils/clockSync';
+import { configureHighFidelityAudioSDP } from '../utils/sdp';
 import Visualizer from './Visualizer';
 
 export default function ReceiverView({ initialRoomId = '', onBack }) {
@@ -29,6 +30,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const wakeLockRef = useRef(null);
   const webrtcStreamRef = useRef(null);
   const activeCallRef = useRef(null);
+  const audioElRef = useRef(null);
 
   const requestWakeLock = async () => {
     try {
@@ -159,8 +161,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           // Process high-resolution master clock synchronization response
           clockSync.handlePong(data);
         } else if (data.type === 'SYNC_CLAPPER') {
-          // Fire scheduled acoustic tick & visual flash through delay pipeline
-          clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash, audioProcessor.delayNode);
+          // Fire scheduled acoustic tick & visual flash.
+          // Target 'default' (ctx.destination) so clapper ALWAYS sounds even before audio stream connects
+          clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash, 'default');
         } else if (data.type === 'CALIBRATE_TELEMETRY') {
           applyTelemetrySync(data.hostDelayMs, data.rtt, data.laptopMuted);
         } else if (data.type === 'HOST_DELAY_UPDATE') {
@@ -189,7 +192,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
     peer.on('call', (call) => {
       console.log('[Receiver] Answering incoming audio stream from Host...');
-      call.answer();
+      call.answer(undefined, { sdpTransform: configureHighFidelityAudioSDP });
 
       call.on('stream', (remoteAudioStream) => {
         console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
@@ -199,6 +202,16 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
             track.contentHint = 'music';
           }
         });
+
+        // CRITICAL: Remote WebRTC streams in Chromium & Firefox require an active HTMLAudioElement
+        // to pull RTP packets from the network. Without this, createMediaStreamSource receives pure silence!
+        // The element MUST be permanently muted & volume 0 so it never produces double playback.
+        if (audioElRef.current) {
+          audioElRef.current.srcObject = remoteAudioStream;
+          audioElRef.current.muted = true;
+          audioElRef.current.volume = 0;
+          audioElRef.current.play().catch(e => console.warn('[Receiver] Stream activator notice:', e));
+        }
 
         // Route audio exclusively through Web Audio API DelayNode pipeline
         audioProcessor.setupStream(remoteAudioStream);
@@ -793,8 +806,15 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
       </div>
       
-      {/* NO hidden <audio> element! Audio plays ONLY through the Web Audio API DelayNode pipeline.
-          An <audio> element would bypass the delay chain and play raw undelayed WebRTC audio. */}
+      {/* Hidden Muted Audio Element: Required by Chromium & Firefox to pull incoming WebRTC RTP audio packets.
+          Kept 100% MUTED so it NEVER produces double playback or bypasses the Web Audio Delay pipeline. */}
+      <audio 
+        ref={audioElRef} 
+        autoPlay 
+        playsInline 
+        muted 
+        style={{ position: 'fixed', top: -9999, left: -9999, width: 1, height: 1, opacity: 0, pointerEvents: 'none' }} 
+      />
     </div>
   );
 }
