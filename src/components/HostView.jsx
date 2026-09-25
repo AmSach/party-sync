@@ -124,6 +124,24 @@ export default function HostView({ onBack }) {
           handleCalibrateRequest(conn);
         } else if (data.type === 'EMIT_PULSE_REQUEST') {
           emitSyncPulse();
+        } else if (data.type === 'REQUEST_HOST_DELAY') {
+          // Satellite says: "My inherent latency is X, you need to delay yourself by at least Y"
+          // Take the MAX of current host delay and the requested delay — never go DOWN from a satellite request
+          // because another satellite might need the higher delay
+          const requestedMs = Math.round(data.neededDelayMs || 0);
+          const currentMs = hostDelayMsRef.current;
+          if (requestedMs > currentMs) {
+            console.log(`[Host] Satellite "${data.deviceName || conn.peer}" needs ${requestedMs}ms host delay (currently ${currentMs}ms) — auto-bumping`);
+            handleDelayChange(requestedMs);
+            // Notify ALL satellites about the new host delay so they can re-align
+            activeConnectionsRef.current.forEach((c) => {
+              if (c.open) {
+                c.send({ type: 'HOST_DELAY_UPDATE', hostDelayMs: requestedMs });
+              }
+            });
+          } else {
+            console.log(`[Host] Satellite "${data.deviceName || conn.peer}" needs ${requestedMs}ms — already at ${currentMs}ms, no change needed`);
+          }
         }
       });
 
@@ -478,6 +496,8 @@ export default function HostView({ onBack }) {
     }
   };
 
+  const hostDelayBroadcastTimer = useRef(null);
+
   const handleDelayChange = (ms) => {
     const clamped = Math.max(0, Math.min(2000, ms));
     setHostDelayMs(clamped);
@@ -497,6 +517,16 @@ export default function HostView({ onBack }) {
         } catch (e) {}
       }
     }
+
+    // Debounced broadcast to satellites so they re-align (300ms debounce to avoid flooding during slider drag)
+    if (hostDelayBroadcastTimer.current) clearTimeout(hostDelayBroadcastTimer.current);
+    hostDelayBroadcastTimer.current = setTimeout(() => {
+      activeConnectionsRef.current.forEach((c) => {
+        if (c.open) {
+          c.send({ type: 'HOST_DELAY_UPDATE', hostDelayMs: clamped });
+        }
+      });
+    }, 300);
   };
 
   const stopBroadcasting = (fullTeardown = false) => {

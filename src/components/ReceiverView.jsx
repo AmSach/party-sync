@@ -164,7 +164,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         } else if (data.type === 'CALIBRATE_TELEMETRY') {
           applyTelemetrySync(data.hostDelayMs, data.rtt, data.laptopMuted);
         } else if (data.type === 'HOST_DELAY_UPDATE') {
-          console.log('[Receiver] Host changed delay to:', data.hostDelayMs);
+          console.log('[Receiver] Host bumped delay to:', data.hostDelayMs, '→ re-aligning');
+          // Host bumped its delay (probably because we or another satellite requested it)
+          // Re-run sync with the new host delay so we align to the updated timing
+          applyTelemetrySync(data.hostDelayMs, clockSync.rtt || 10, false);
         } else if (data.type === 'START_CALIBRATE_CLIENT') {
           performAutoSync();
         }
@@ -308,14 +311,31 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       // Target: Host Total == Receiver Total
       const receiverBaseLatency = Math.round(oneWayTransit + 35 + totalDac + profileOffset);
       const hostTotal = hostDelay + 20;
-      targetOffset = Math.max(0, Math.min(1000, hostTotal - receiverBaseLatency));
+
+      if (hostTotal < receiverBaseLatency) {
+        // CAN'T GO NEGATIVE — tell the host to delay itself to match this satellite's inherent latency
+        const neededHostDelay = receiverBaseLatency - 20; // subtract host DAC since host adds it
+        console.log(`[Receiver] Host delay ${hostDelay}ms too low for our latency ${receiverBaseLatency}ms → requesting host bump to ${neededHostDelay}ms`);
+        if (connRef.current && connRef.current.open) {
+          connRef.current.send({ 
+            type: 'REQUEST_HOST_DELAY', 
+            neededDelayMs: neededHostDelay,
+            receiverBaseLatency,
+            deviceName 
+          });
+        }
+        targetOffset = 0; // We play at zero additional delay — host will delay itself to match us
+      } else {
+        targetOffset = Math.min(2000, hostTotal - receiverBaseLatency);
+      }
     }
 
     setDelayMs(targetOffset);
     audioProcessor.setDelay(targetOffset);
 
     setAutoSyncStatus('done');
-    setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Host: ${hostDelay}ms → Phone Delay: +${targetOffset}ms)`);
+    const syncDirection = targetOffset === 0 && !isHostMuted ? '⬆️ Host bumped to match' : `Phone: +${targetOffset}ms`;
+    setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Host: ${hostDelay}ms → ${syncDirection})`);
     triggerVisualFlash();
   };
 
