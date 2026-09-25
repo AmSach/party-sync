@@ -466,28 +466,21 @@ export default function HostView({ onBack }) {
     const clamped = Math.max(0, Math.min(2000, ms));
     setHostDelayMs(clamped);
     hostDelayMsRef.current = clamped;
+
     if (hostDelayNodeRef.current && audioContextRef.current) {
-      const ctx = audioContextRef.current;
-      const now = ctx.currentTime;
-      const gainNode = hostGainNodeRef.current;
-      if (gainNode && !laptopMuted) {
-        gainNode.gain.cancelScheduledValues(now);
-        gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-        gainNode.gain.linearRampToValueAtTime(0.001, now + 0.015);
-        hostDelayNodeRef.current.delayTime.setValueAtTime(clamped / 1000, now + 0.018);
-        gainNode.gain.setValueAtTime(0.001, now + 0.020);
-        gainNode.gain.linearRampToValueAtTime(1.0, now + 0.035);
-      } else {
+      try {
+        const ctx = audioContextRef.current;
+        const now = ctx.currentTime;
+        hostDelayNodeRef.current.delayTime.cancelScheduledValues(0);
         hostDelayNodeRef.current.delayTime.setValueAtTime(clamped / 1000, now);
+        console.log(`[Host] Host delay updated to ${clamped}ms`);
+      } catch (err) {
+        console.warn('[Host] Host delay update error, using fallback:', err);
+        try {
+          hostDelayNodeRef.current.delayTime.value = clamped / 1000;
+        } catch (e) {}
       }
     }
-
-    // Broadcast host delay update to all satellites in real time
-    activeConnectionsRef.current.forEach(conn => {
-      if (conn.open) {
-        conn.send({ type: 'HOST_DELAY_UPDATE', hostDelayMs: clamped });
-      }
-    });
   };
 
   const stopBroadcasting = (fullTeardown = false) => {

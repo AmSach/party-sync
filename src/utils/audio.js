@@ -71,12 +71,11 @@ class SyncedAudioProcessor {
    * Continuous slider dragging uses smooth parameter interpolation without muting.
    * Discrete jumps use a micro-crossfade to eliminate pops.
    */
-  setDelay(ms, isDiscreteJump = false) {
+  setDelay(ms) {
     this.delayMs = Math.max(0, Math.min(2000, ms));
-    
     const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
     
-    console.log(`[AudioProcessor] setDelay(${ms}ms, discrete=${isDiscreteJump}) → effective=${(effectiveSec * 1000).toFixed(1)}ms | ctx=${!!this.ctx} state=${this.ctx?.state} | delayNode=${!!this.delayNode} | gainNode=${!!this.gainNode}`);
+    console.log(`[AudioProcessor] setDelay(${ms}ms) → effective=${(effectiveSec * 1000).toFixed(1)}ms | ctx=${!!this.ctx} state=${this.ctx?.state} | delayNode=${!!this.delayNode}`);
     
     if (!this.delayNode || !this.ctx) {
       console.warn('[AudioProcessor] setDelay SKIPPED — delayNode or ctx is null!');
@@ -85,38 +84,19 @@ class SyncedAudioProcessor {
 
     // Ensure AudioContext is running (mobile browsers suspend it)
     if (this.ctx.state === 'suspended') {
-      this.ctx.resume().then(() => {
-        console.log('[AudioProcessor] AudioContext resumed from suspended state');
-      });
+      this.ctx.resume().catch(() => {});
     }
 
-    if (!this.gainNode || this.ctx.state !== 'running') {
-      this.delayNode.delayTime.setValueAtTime(effectiveSec, this.ctx.currentTime);
-      console.log(`[AudioProcessor] setDelay applied via setValueAtTime (ctx not running or no gainNode)`);
-      return;
-    }
-
-    if (isDiscreteJump) {
-      // Micro-crossfade for large button jumps (+50ms, reset, profile switch)
+    try {
       const now = this.ctx.currentTime;
-      const targetGain = this.currentVolume;
-
-      this.gainNode.gain.cancelScheduledValues(now);
-      this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-      this.gainNode.gain.linearRampToValueAtTime(0.01, now + 0.012);
-
-      this.delayNode.delayTime.setValueAtTime(effectiveSec, now + 0.015);
-
-      this.gainNode.gain.setValueAtTime(0.01, now + 0.018);
-      this.gainNode.gain.linearRampToValueAtTime(targetGain, now + 0.030);
-      
-      console.log(`[AudioProcessor] setDelay applied via micro-crossfade, target=${effectiveSec.toFixed(4)}s`);
-    } else {
-      // Continuous slider drag: smooth real-time parameter tracking WITHOUT muting!
-      // You hear the audio shift immediately as your finger moves.
-      this.delayNode.delayTime.setTargetAtTime(effectiveSec, this.ctx.currentTime, 0.025);
-      
-      console.log(`[AudioProcessor] setDelay applied via setTargetAtTime, target=${effectiveSec.toFixed(4)}s`);
+      // Wipe ANY previous scheduled events on delayTime to prevent DOMException collisions
+      this.delayNode.delayTime.cancelScheduledValues(0);
+      this.delayNode.delayTime.setValueAtTime(effectiveSec, now);
+    } catch (err) {
+      console.warn('[AudioProcessor] setValueAtTime failed, using direct property assignment:', err);
+      try {
+        this.delayNode.delayTime.value = effectiveSec;
+      } catch (e) {}
     }
   }
 

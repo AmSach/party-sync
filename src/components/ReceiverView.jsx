@@ -155,7 +155,6 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           applyTelemetrySync(data.hostDelayMs, data.rtt, data.laptopMuted);
         } else if (data.type === 'HOST_DELAY_UPDATE') {
           console.log('[Receiver] Host changed delay to:', data.hostDelayMs);
-          applyTelemetrySync(data.hostDelayMs, clockSync.rtt, false);
         } else if (data.type === 'START_CALIBRATE_CLIENT') {
           performAutoSync();
         }
@@ -243,13 +242,13 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       offset = 0;
     }
     setDelayMs(offset);
-    audioProcessor.setDelay(offset, true);
+    audioProcessor.setDelay(offset);
   };
 
-  const handleNudgeChange = (ms, isDiscrete = false) => {
+  const handleNudgeChange = (ms) => {
     const clamped = Math.max(0, Math.min(1000, ms));
     setDelayMs(clamped);
-    audioProcessor.setDelay(clamped, isDiscrete);
+    audioProcessor.setDelay(clamped);
   };
 
   const handleVolumeChange = (vol) => {
@@ -317,7 +316,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
 
     setDelayMs(targetOffset);
-    audioProcessor.setDelay(targetOffset, true); // 15ms micro-crossfade, ZERO WHOOSH!
+    audioProcessor.setDelay(targetOffset);
 
     setAutoSyncStatus('done');
     setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Host: ${hostDelay}ms → Phone Delay: +${targetOffset}ms)`);
@@ -689,7 +688,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 ].map(b => (
                   <button
                     key={b.label}
-                    onClick={() => handleNudgeChange(Math.max(0, Math.min(1000, b.val)), true)}
+                    onClick={() => handleNudgeChange(Math.max(0, Math.min(1000, b.val)))}
                     className="btn-analog"
                     style={{
                       padding: '6px 2px',
@@ -712,7 +711,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 ].map(b => (
                   <button
                     key={b.label}
-                    onClick={() => handleNudgeChange(b.val, true)}
+                    onClick={() => handleNudgeChange(b.val)}
                     className="btn-analog"
                     style={{
                       padding: '6px 2px',
