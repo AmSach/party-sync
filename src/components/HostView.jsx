@@ -18,8 +18,9 @@ export default function HostView({ onBack }) {
   const [copied, setCopied] = useState(false);
   
   // Host local playback pipeline delay & mute controls
-  const [laptopMuted, setLaptopMuted] = useState(true); // Default to Muted (Party Mode: Phones Only) to prevent double-audio comb-filtering on host!
-  const [hostDelayMs, setHostDelayMs] = useState(120); // Stable locked default matching WebRTC transmission
+  const [laptopMuted, setLaptopMuted] = useState(true);
+  const [hostDelayMs, setHostDelayMs] = useState(300); // 300ms default matches typical WebRTC transit latency
+  const hostDelayMsRef = useRef(300);
   const [isFlashing, setIsFlashing] = useState(false);
 
   const [activeMediaTitle, setActiveMediaTitle] = useState('No audio source selected');
@@ -177,7 +178,7 @@ export default function HostView({ onBack }) {
     if (!conn || !conn.open) return;
     conn.send({ 
       type: 'CALIBRATE_TELEMETRY', 
-      hostDelayMs: hostDelayMs,
+      hostDelayMs: hostDelayMsRef.current,
       laptopMuted: laptopMuted,
       rtt: clockSync.rtt || 0 
     });
@@ -205,7 +206,7 @@ export default function HostView({ onBack }) {
           displaySurface: 'browser'
         },
         audio: {
-          suppressLocalAudioPlayback: false, // Prevents Windows WASAPI audio ducking & BLE degradation
+          suppressLocalAudioPlayback: true, // CRITICAL: Suppress tab's direct audio — play through our delayed Web Audio pipeline instead to sync with phones
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -233,9 +234,13 @@ export default function HostView({ onBack }) {
       // Stop video tracks immediately to save CPU and network bandwidth
       mediaStream.getVideoTracks().forEach(t => t.stop());
 
-      // Screen capture: Default laptopMuted to true so host laptop does not echo the already-playing tab!
-      setLaptopMuted(true);
-      setupHostAudio(audioOnlyStream, true);
+      // Screen capture: Tab audio is SUPPRESSED (suppressLocalAudioPlayback=true).
+      // Host plays through delayed Web Audio pipeline to sync with phones.
+      // 300ms delay matches typical WebRTC transit (encode + network + jitter + decode).
+      setHostDelayMs(300);
+      hostDelayMsRef.current = 300;
+      setLaptopMuted(false);
+      setupHostAudio(audioOnlyStream, false); // false = DON'T mute host, play through delayed pipeline
     } catch (err) {
       console.error("[Host] Screen capture error:", err);
     }
@@ -288,23 +293,10 @@ export default function HostView({ onBack }) {
     // Route to WebRTC broadcast destination
     sourceNode.connect(streamDest);
 
-    // Host local playback pipeline
-    const hostDelay = ctx.createDelay(1.0);
-    hostDelay.delayTime.setValueAtTime(hostDelayMs / 1000, ctx.currentTime);
-    hostDelayNodeRef.current = hostDelay;
-
-    const hostGain = ctx.createGain();
-    hostGain.gain.setValueAtTime(1.0, ctx.currentTime);
-    hostGainNodeRef.current = hostGain;
-    setLaptopMuted(false); // Enable laptop playback for local files!
-
-    sourceNode.connect(hostDelay);
-    hostDelay.connect(hostGain);
-    hostGain.connect(ctx.destination);
-
     audioEl.play().catch(err => console.error("[Host] Audio playback error:", err));
 
-    // Broadcast audio-only stream to satellites
+    // Broadcast audio-only stream to satellites & configure delayed host playback
+    setLaptopMuted(false);
     setupHostAudio(streamDest.stream, false);
   };
 
@@ -406,6 +398,12 @@ export default function HostView({ onBack }) {
       if (hostSourceNodeRef.current) {
         try { hostSourceNodeRef.current.disconnect(); } catch (e) {}
       }
+      if (hostDelayNodeRef.current) {
+        try { hostDelayNodeRef.current.disconnect(); } catch (e) {}
+      }
+      if (hostGainNodeRef.current) {
+        try { hostGainNodeRef.current.disconnect(); } catch (e) {}
+      }
 
       const source = ctx.createMediaStreamSource(stream);
       hostSourceNodeRef.current = source;
@@ -416,15 +414,18 @@ export default function HostView({ onBack }) {
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // DELAY NODE: Delays Host Laptop speaker playback by hostDelayMs (120ms)
-      // to eliminate the slap-back echo between laptop and phones when laptop speaker is active
-      const hostDelay = ctx.createDelay(1.0);
-      hostDelay.delayTime.setValueAtTime(hostDelayMs / 1000, ctx.currentTime);
+      // DELAY NODE: Delays Host Laptop speaker playback to sync with phones.
+      // Without this delay, laptop plays at T=0 while phones play at T+300ms via WebRTC.
+      // Supports up to 3.0s (3000ms) delay for high-latency Wi-Fi and Bluetooth pipelines.
+      const hostDelay = ctx.createDelay(3.0);
+      const currentDelayMs = hostDelayMsRef.current;
+      hostDelay.delayTime.setValueAtTime(currentDelayMs / 1000, ctx.currentTime);
       hostDelayNodeRef.current = hostDelay;
+      console.log(`[Host] Delay pipeline set to ${currentDelayMs}ms`);
 
       // GAIN NODE: For muting laptop speakers
       const hostGain = ctx.createGain();
-      const shouldMute = isScreenCapture ? true : false;
+      const shouldMute = isScreenCapture ? false : false; // Screen capture uses delayed host playback (tab is muted by suppressLocalAudioPlayback)
       setLaptopMuted(shouldMute);
       hostGain.gain.setValueAtTime(shouldMute ? 0 : 1.0, ctx.currentTime);
       hostGainNodeRef.current = hostGain;
@@ -462,8 +463,9 @@ export default function HostView({ onBack }) {
   };
 
   const handleDelayChange = (ms) => {
-    const clamped = Math.max(0, Math.min(300, ms));
+    const clamped = Math.max(0, Math.min(2000, ms));
     setHostDelayMs(clamped);
+    hostDelayMsRef.current = clamped;
     if (hostDelayNodeRef.current && audioContextRef.current) {
       const ctx = audioContextRef.current;
       const now = ctx.currentTime;
@@ -479,6 +481,13 @@ export default function HostView({ onBack }) {
         hostDelayNodeRef.current.delayTime.setValueAtTime(clamped / 1000, now);
       }
     }
+
+    // Broadcast host delay update to all satellites in real time
+    activeConnectionsRef.current.forEach(conn => {
+      if (conn.open) {
+        conn.send({ type: 'HOST_DELAY_UPDATE', hostDelayMs: clamped });
+      }
+    });
   };
 
   const stopBroadcasting = (fullTeardown = false) => {
@@ -736,61 +745,87 @@ export default function HostView({ onBack }) {
             </button>
           </div>
 
-          {/* Stepped Adjustments for Host Delay */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Clock size={14} color="var(--text-muted)" />
-              <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                Host Playback Delay:
-              </span>
-              <strong className="font-mono" style={{ fontSize: '12px', color: 'var(--amber-bright)' }}>
-                {hostDelayMs} ms
+          {/* Continuous Slider & Stepped Adjustments for Host Delay */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Clock size={14} color="var(--amber-bright)" />
+                <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  HOST PLAYBACK DELAY:
+                </span>
+                <span style={{ fontSize: '10px', color: 'var(--text-dim)' }}>
+                  (Adjusts laptop timing to match phones)
+                </span>
+              </div>
+              <strong className="font-mono paper-badge" style={{ fontSize: '13px', padding: '3px 10px', color: hostDelayMs === 0 ? '#10b981' : 'var(--amber-bright)' }}>
+                {hostDelayMs === 0 ? '0ms (Direct / No Delay)' : `${hostDelayMs} ms`}
               </strong>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <button 
-                onClick={() => handleDelayChange(hostDelayMs - 50)}
-                className="btn-analog" 
-                style={{ padding: '4px 8px', fontSize: '11px' }}
-              >
-                -50ms
-              </button>
-              <button 
-                onClick={() => handleDelayChange(hostDelayMs - 10)}
-                className="btn-analog" 
-                style={{ padding: '4px 8px', fontSize: '11px' }}
-              >
-                -10ms
-              </button>
+            {/* Continuous Host Delay Slider: 0ms to 1500ms */}
+            <input 
+              type="range" 
+              min="0" 
+              max="1500" 
+              step="5"
+              value={hostDelayMs} 
+              onChange={(e) => handleDelayChange(parseInt(e.target.value))} 
+              style={{ width: '100%', accentColor: 'var(--amber-bright)' }}
+            />
 
-              <button 
-                onClick={() => handleDelayChange(120)}
-                className="btn-analog" 
-                style={{ 
-                  padding: '4px 10px', 
-                  fontSize: '11px',
-                  background: hostDelayMs === 120 ? 'var(--amber-core)' : '#1a1816',
-                  color: hostDelayMs === 120 ? '#0c0b0a' : 'var(--text-cream)'
-                }}
-              >
-                120ms (Standard Lock)
-              </button>
+            {/* Stepped Fine-Tuning Nudge Buttons */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '4px' }}>
+              {[
+                { label: '-100ms', val: hostDelayMs - 100 },
+                { label: '-50ms', val: hostDelayMs - 50 },
+                { label: '-10ms', val: hostDelayMs - 10 },
+                { label: '+10ms', val: hostDelayMs + 10 },
+                { label: '+50ms', val: hostDelayMs + 50 },
+                { label: '+100ms', val: hostDelayMs + 100 },
+              ].map(b => (
+                <button
+                  key={b.label}
+                  onClick={() => handleDelayChange(b.val)}
+                  className="btn-analog"
+                  style={{ padding: '6px 2px', fontSize: '11px', fontFamily: 'monospace' }}
+                >
+                  {b.label}
+                </button>
+              ))}
+            </div>
 
-              <button 
-                onClick={() => handleDelayChange(hostDelayMs + 10)}
-                className="btn-analog" 
-                style={{ padding: '4px 8px', fontSize: '11px' }}
-              >
-                +10ms
-              </button>
-              <button 
-                onClick={() => handleDelayChange(hostDelayMs + 50)}
-                className="btn-analog" 
-                style={{ padding: '4px 8px', fontSize: '11px' }}
-              >
-                +50ms
-              </button>
+            {/* Quick Preset Buttons (supporting beyond 300ms!) */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px' }}>
+              {[
+                { label: '0ms', val: 0 },
+                { label: '150ms', val: 150 },
+                { label: '250ms', val: 250 },
+                { label: '350ms', val: 350 },
+                { label: '500ms', val: 500 },
+                { label: '700ms', val: 700 },
+                { label: '1000ms', val: 1000 },
+              ].map(b => (
+                <button
+                  key={b.label}
+                  onClick={() => handleDelayChange(b.val)}
+                  className="btn-analog"
+                  style={{
+                    padding: '6px 2px',
+                    fontSize: '10px',
+                    fontFamily: 'monospace',
+                    background: hostDelayMs === b.val ? 'var(--amber-core)' : '#1a1816',
+                    color: hostDelayMs === b.val ? '#0c0b0a' : 'var(--text-cream)'
+                  }}
+                >
+                  {b.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
+              <span>0ms (No Delay)</span>
+              <span style={{ color: 'var(--amber-bright)' }}>Increase delay if phones sound late</span>
+              <span>1500ms (High Latency)</span>
             </div>
           </div>
         </div>

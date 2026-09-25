@@ -28,6 +28,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const connRef = useRef(null);
   const wakeLockRef = useRef(null);
   const webrtcStreamRef = useRef(null);
+  const activeCallRef = useRef(null);
 
   const requestWakeLock = async () => {
     try {
@@ -152,6 +153,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash, audioProcessor.delayNode);
         } else if (data.type === 'CALIBRATE_TELEMETRY') {
           applyTelemetrySync(data.hostDelayMs, data.rtt, data.laptopMuted);
+        } else if (data.type === 'HOST_DELAY_UPDATE') {
+          console.log('[Receiver] Host changed delay to:', data.hostDelayMs);
+          applyTelemetrySync(data.hostDelayMs, clockSync.rtt, false);
         } else if (data.type === 'START_CALIBRATE_CLIENT') {
           performAutoSync();
         }
@@ -167,8 +171,28 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     });
 
     peer.on('call', (call) => {
+      // Close previous call to prevent duplicate streams/audio duplication!
+      if (activeCallRef.current && activeCallRef.current !== call) {
+        try { activeCallRef.current.close(); } catch (e) {}
+      }
+      activeCallRef.current = call;
+
       console.log('[Receiver] Answering audio pipe with Studio Hi-Fi Opus...');
       call.answer();
+
+      // Optimize WebRTC receiver for minimal buffering latency
+      if (call.peerConnection) {
+        try {
+          call.peerConnection.getReceivers().forEach(receiver => {
+            if ('playoutDelayHint' in receiver) {
+              receiver.playoutDelayHint = 0;
+            }
+            if ('jitterBufferTarget' in receiver) {
+              receiver.jitterBufferTarget = 0;
+            }
+          });
+        } catch (e) {}
+      }
 
       call.on('stream', (remoteAudioStream) => {
         console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
@@ -179,21 +203,19 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           }
         });
 
-        // Route audio through Web Audio API (uncompressed bit-perfect 48kHz)
+        // Route audio exclusively through Web Audio API DelayNode pipeline
         audioProcessor.setupStream(remoteAudioStream);
-
-        // CRITICAL: Do NOT use an <audio> element to play the stream!
-        // The <audio> element bypasses the Web Audio API DelayNode pipeline entirely,
-        // rendering the delay slider and auto-sync completely inaudible.
-        // All audio MUST flow through: sourceNode → delayNode → gainNode → ctx.destination
 
         setIsAudioActive(true);
         setStatusText('● Live Synchronized Studio Playout');
       });
 
       call.on('close', () => {
-        setIsAudioActive(false);
-        setStatusText('Audio Feed Stopped');
+        if (activeCallRef.current === call) {
+          activeCallRef.current = null;
+          setIsAudioActive(false);
+          setStatusText('Audio Feed Stopped');
+        }
       });
     });
 
@@ -214,9 +236,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     setHardwareProfile(profile);
     let offset = 0;
     if (profile === 'bt_speaker') {
-      offset = 180; // Standard Bluetooth speaker SBC/AAC buffer latency compensation
+      offset = 200; // Standard Bluetooth speaker SBC/AAC buffer latency compensation
     } else if (profile === 'bt_headphones') {
-      offset = 120; // Bluetooth earbud latency compensation
+      offset = 150; // Bluetooth earbud latency compensation
     } else if (profile === 'phone' || profile === 'aux') {
       offset = 0;
     }
@@ -225,8 +247,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   };
 
   const handleNudgeChange = (ms, isDiscrete = false) => {
-    setDelayMs(ms);
-    audioProcessor.setDelay(ms, isDiscrete);
+    const clamped = Math.max(0, Math.min(1000, ms));
+    setDelayMs(clamped);
+    audioProcessor.setDelay(clamped, isDiscrete);
   };
 
   const handleVolumeChange = (vol) => {
@@ -263,7 +286,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     connRef.current.send({ type: 'CALIBRATE_REQUEST' });
   };
 
-  const applyTelemetrySync = (hostDelay = 120, rtt = 10, isHostMuted = false) => {
+  const applyTelemetrySync = (hostDelay = 350, rtt = 10, isHostMuted = false) => {
     const effectiveRtt = rtt > 0 ? rtt : (clockSync.rtt || 10);
     const oneWayTransit = effectiveRtt / 2;
 
@@ -274,33 +297,38 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
     let profileOffset = 0;
     if (hardwareProfile === 'bt_speaker') {
-      profileOffset = 180;
+      profileOffset = 200;
     } else if (hardwareProfile === 'bt_headphones') {
-      profileOffset = 120;
+      profileOffset = 150;
     }
 
     let targetOffset = 0;
     if (isHostMuted) {
-      // Party Mode (Laptop Muted): Satellites synchronize with each other
-      targetOffset = Math.max(-90, Math.min(350, -profileOffset));
+      // Party Mode (Host Muted): All satellites play as fast as possible with minimal delay
+      targetOffset = 0;
     } else {
       // Host Laptop Speaker Active:
-      // Host total latency = hostDelay + 20ms (Host DAC)
-      // Receiver total latency = oneWayTransit + 35ms (WebRTC jitter buffer) + 100ms (base buffer) + targetOffset + totalDac + profileOffset
-      // Set targetOffset so Host total latency == Receiver total latency:
-      targetOffset = Math.round((hostDelay + 20) - (oneWayTransit + 135 + totalDac + profileOffset));
-      targetOffset = Math.max(-90, Math.min(350, targetOffset));
+      // Host Total Latency = hostDelay (from host delay node) + 20ms (host DAC)
+      // Receiver Total Latency = oneWayTransit + 35ms (WebRTC jitter) + totalDac + profileOffset + targetOffset
+      // Target: Host Total == Receiver Total
+      const receiverBaseLatency = Math.round(oneWayTransit + 35 + totalDac + profileOffset);
+      const hostTotal = hostDelay + 20;
+      targetOffset = Math.max(0, Math.min(1000, hostTotal - receiverBaseLatency));
     }
 
     setDelayMs(targetOffset);
-    audioProcessor.setDelay(targetOffset); // 15ms micro-crossfade, ZERO WHOOSH!
+    audioProcessor.setDelay(targetOffset, true); // 15ms micro-crossfade, ZERO WHOOSH!
 
     setAutoSyncStatus('done');
-    setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Target Offset: ${targetOffset >= 0 ? '+' : ''}${targetOffset}ms)`);
+    setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Host: ${hostDelay}ms → Phone Delay: +${targetOffset}ms)`);
     triggerVisualFlash();
   };
 
   const disconnect = () => {
+    if (activeCallRef.current) {
+      try { activeCallRef.current.close(); } catch (e) {}
+      activeCallRef.current = null;
+    }
     if (connRef.current) connRef.current.close();
     if (peerRef.current) peerRef.current.destroy();
     audioProcessor.disconnect();
@@ -638,36 +666,34 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                   </div>
                 </div>
                 <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: delayMs === 0 ? '#10b981' : 'var(--accent-bright)' }}>
-                  {delayMs === 0 ? '0ms (Locked)' : `${delayMs > 0 ? '+' : ''}${delayMs}ms`}
+                  {delayMs === 0 ? '0ms (Fastest WebRTC)' : `+${delayMs}ms Delay`}
                 </span>
               </div>
 
               <input 
                 type="range" 
-                min="-90" 
-                max="350" 
+                min="0" 
+                max="1000" 
                 step="5"
                 value={delayMs} 
                 onChange={(e) => handleNudgeChange(parseInt(e.target.value))} 
               />
 
               {/* Stepped Coarse/Fine Alignment Buttons */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '4px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
                 {[
                   { label: '-50ms', val: delayMs - 50 },
                   { label: '-10ms', val: delayMs - 10 },
-                  { label: '0ms Reset', val: 0 },
                   { label: '+10ms', val: delayMs + 10 },
                   { label: '+50ms', val: delayMs + 50 },
-                  { label: '+180ms BT', val: 180 },
                 ].map(b => (
                   <button
                     key={b.label}
-                    onClick={() => handleNudgeChange(Math.max(-90, Math.min(350, b.val)), true)}
+                    onClick={() => handleNudgeChange(Math.max(0, Math.min(1000, b.val)), true)}
                     className="btn-analog"
                     style={{
                       padding: '6px 2px',
-                      fontSize: '10px',
+                      fontSize: '11px',
                       fontFamily: 'monospace'
                     }}
                   >
@@ -676,10 +702,35 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 ))}
               </div>
 
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '4px' }}>
+                {[
+                  { label: '0ms Min', val: 0 },
+                  { label: '+100ms', val: 100 },
+                  { label: '+200ms BT', val: 200 },
+                  { label: '+350ms', val: 350 },
+                  { label: '+500ms', val: 500 },
+                ].map(b => (
+                  <button
+                    key={b.label}
+                    onClick={() => handleNudgeChange(b.val, true)}
+                    className="btn-analog"
+                    style={{
+                      padding: '6px 2px',
+                      fontSize: '10px',
+                      fontFamily: 'monospace',
+                      background: delayMs === b.val ? 'var(--accent-core)' : undefined,
+                      color: delayMs === b.val ? '#0f1419' : undefined
+                    }}
+                  >
+                    {b.label}
+                  </button>
+                ))}
+              </div>
+
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
-                <span>Faster (-90ms)</span>
+                <span>0ms (Immediate)</span>
                 <span style={{ color: 'var(--accent-bright)' }}>Phase Synchronized</span>
-                <span>Bluetooth Delay (+350ms)</span>
+                <span>+1000ms (High Latency)</span>
               </div>
             </div>
 

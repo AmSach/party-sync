@@ -11,7 +11,7 @@ class SyncedAudioProcessor {
     this.compressorNode = null;
     this.analyserNode = null;
     this.delayMs = 0;
-    this.baseBufferMs = 100; // 100ms base buffer allows clean -90ms to +350ms delay adjustments (ideal for Bluetooth)
+    this.baseBufferMs = 0; // Zero base buffer — minimum latency. Delay slider adds ms ON TOP of WebRTC pipeline latency.
     this.currentVolume = 1.0;
   }
 
@@ -39,8 +39,8 @@ class SyncedAudioProcessor {
 
       this.sourceNode = this.ctx.createMediaStreamSource(mediaStream);
       
-      // Delay Node supporting up to 2.0s (sufficient for Bluetooth latencies)
-      this.delayNode = this.ctx.createDelay(2.0);
+      // Delay Node supporting up to 3.0s (sufficient for high-latency Wi-Fi & Bluetooth pipelines)
+      this.delayNode = this.ctx.createDelay(3.0);
       const initialDelay = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
       this.delayNode.delayTime.setValueAtTime(initialDelay, this.ctx.currentTime);
 
@@ -72,7 +72,7 @@ class SyncedAudioProcessor {
    * Discrete jumps use a micro-crossfade to eliminate pops.
    */
   setDelay(ms, isDiscreteJump = false) {
-    this.delayMs = Math.max(-90, Math.min(400, ms));
+    this.delayMs = Math.max(0, Math.min(2000, ms));
     
     const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
     
