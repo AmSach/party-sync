@@ -207,10 +207,28 @@ export default function HostView({ onBack }) {
   const callPeerWithStream = (peerId, stream) => {
     if (!peerRef.current || !peerRef.current.open || !stream) return;
 
+    // Check if we have an active, TRULY live call to this peer
     const existingCall = activeMediaCallsRef.current.get(peerId);
-    if (existingCall && existingCall.open) {
-      console.log(`[Host] Media call already active for satellite ${peerId}`);
-      return;
+    if (existingCall) {
+      // Verify the existing call is actually alive — PeerJS .open can be stale
+      const isCallAlive = existingCall.open && 
+        existingCall.peerConnection && 
+        existingCall.peerConnection.connectionState !== 'closed' &&
+        existingCall.peerConnection.connectionState !== 'failed' &&
+        existingCall.peerConnection.connectionState !== 'disconnected';
+      
+      // Also check if the stream tracks are still live
+      const tracksLive = stream.getAudioTracks().some(t => t.readyState === 'live');
+      
+      if (isCallAlive && tracksLive) {
+        console.log(`[Host] Media call already active for satellite ${peerId}`);
+        return;
+      }
+      
+      // Stale call — clean up before re-calling
+      console.log(`[Host] Stale media call detected for ${peerId} — closing and re-calling`);
+      try { existingCall.close(); } catch (e) {}
+      activeMediaCallsRef.current.delete(peerId);
     }
 
     console.log(`[Host] Calling satellite ${peerId} with pristine stereo music audio`);
