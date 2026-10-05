@@ -13,21 +13,22 @@ export function configureHighFidelityAudioSDP(sdp) {
     const pt = opusMatch[1];
     const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+([^\\r\\n]+)`, 'i');
 
-    // Broadcast High-Fidelity Stereo Parameters:
+    // Broadcast High-Fidelity Robust Stereo Parameters:
     // - stereo=1: Full stereo channel decoding
     // - sprop-stereo=1: Signal stereo capabilities in SDP
-    // - maxaveragebitrate=256000: Broadcast standard 256kbps stereo (transparent music fidelity)
+    // - maxaveragebitrate=192000: Broadcast transparent 192kbps stereo (CD audio quality)
     // - maxplaybackrate=48000: Full 48kHz frequency spectrum
-    // - useinbandfec=1: Seamlessly heals dropped Wi-Fi packets without audio corruption clicks
-    // - cbr=1: Constant bitrate for consistent high quality
-    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=256000;maxplaybackrate=48000;useinbandfec=1;cbr=1';
+    // - useinbandfec=1: Forward Error Correction seamlessly heals dropped Wi-Fi packets without audio drops
+    // - ptime=20 / minptime=20: Standard 20ms packet pacing prevents router queue congestion and packet loss
+    // - cbr=0: Dynamic Variable Bitrate prevents Wi-Fi buffer overruns
+    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=192000;maxplaybackrate=48000;useinbandfec=1;cbr=0;ptime=20;minptime=20';
 
     if (fmtpRegex.test(modified)) {
       modified = modified.replace(fmtpRegex, (match, existing) => {
         const filtered = existing
           .split(';')
           .map(s => s.trim())
-          .filter(s => !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|cbr|useinbandfec)=/i.test(s))
+          .filter(s => !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|cbr|useinbandfec|ptime|minptime)=/i.test(s))
           .join(';');
         return `a=fmtp:${pt} ${filtered ? filtered + ';' : ''}${studioParams}`;
       });

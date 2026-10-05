@@ -23,6 +23,10 @@ export default function HostView({ onBack }) {
   const [hostDelayMs, setHostDelayMs] = useState(300); // 300ms default matches typical WebRTC transit latency
   const hostDelayMsRef = useRef(300);
   const [isFlashing, setIsFlashing] = useState(false);
+  const [hostOutputProfile, setHostOutputProfile] = useState('internal'); // 'internal' | 'bluetooth' | 'aux'
+  const hostOutputProfileRef = useRef('internal');
+  const satelliteLagsRef = useRef(new Map()); // peerId -> { name, physicalLagMs, profile }
+  const [fleetTargetMs, setFleetTargetMs] = useState(300);
 
   const [activeMediaTitle, setActiveMediaTitle] = useState('No audio source selected');
   const [showQrModal, setShowQrModal] = useState(false);
@@ -125,31 +129,32 @@ export default function HostView({ onBack }) {
           handleCalibrateRequest(conn);
         } else if (data.type === 'EMIT_PULSE_REQUEST') {
           emitSyncPulse();
+        } else if (data.type === 'SATELLITE_LAG_UPDATE') {
+          // Satellite reports its true physical latency (transit + NetEQ + DAC + hardware profile + fine-tune)
+          const lag = Math.max(0, Math.round(data.satellitePhysicalLag || 0));
+          satelliteLagsRef.current.set(conn.peer, {
+            name: data.deviceName || conn.peer,
+            physicalLagMs: lag,
+            profile: data.profile || 'phone'
+          });
+          recalculateFleetSync();
         } else if (data.type === 'REQUEST_HOST_DELAY') {
-          // Satellite says: "My inherent latency is X, you need to delay yourself by at least Y"
-          // Take the MAX of current host delay and the requested delay — never go DOWN from a satellite request
-          // because another satellite might need the higher delay
           const requestedMs = Math.round(data.neededDelayMs || 0);
-          const currentMs = hostDelayMsRef.current;
-          if (requestedMs > currentMs) {
-            console.log(`[Host] Satellite "${data.deviceName || conn.peer}" needs ${requestedMs}ms host delay (currently ${currentMs}ms) — auto-bumping`);
-            handleDelayChange(requestedMs);
-            // Notify ALL satellites about the new host delay so they can re-align
-            activeConnectionsRef.current.forEach((c) => {
-              if (c.open) {
-                c.send({ type: 'HOST_DELAY_UPDATE', hostDelayMs: requestedMs });
-              }
-            });
-          } else {
-            console.log(`[Host] Satellite "${data.deviceName || conn.peer}" needs ${requestedMs}ms — already at ${currentMs}ms, no change needed`);
-          }
+          satelliteLagsRef.current.set(conn.peer, {
+            name: data.deviceName || conn.peer,
+            physicalLagMs: requestedMs + 20,
+            profile: 'phone'
+          });
+          recalculateFleetSync();
         }
       });
 
       conn.on('close', () => {
         console.log('[Host] Satellite disconnected:', conn.peer);
         activeConnectionsRef.current.delete(conn.peer);
+        satelliteLagsRef.current.delete(conn.peer);
         setConnectedPeers(prev => prev.filter(p => p.id !== conn.peer));
+        recalculateFleetSync();
       });
 
       conn.on('error', (err) => {
@@ -191,6 +196,8 @@ export default function HostView({ onBack }) {
     conn.send({ 
       type: 'CALIBRATE_TELEMETRY', 
       hostDelayMs: hostDelayMsRef.current,
+      fleetTargetMs: fleetTargetMs,
+      hostOutputProfile: hostOutputProfileRef.current,
       laptopMuted: laptopMuted,
       rtt: clockSync.rtt || 0 
     });
@@ -500,6 +507,59 @@ export default function HostView({ onBack }) {
 
   const hostDelayBroadcastTimer = useRef(null);
 
+  const recalculateFleetSync = () => {
+    const hostBtLag = hostOutputProfileRef.current === 'bluetooth' ? 200 : 0;
+    const hostPhysicalLag = 20 + hostBtLag; // 20ms DAC + BT lag
+    
+    // Find the maximum physical latency across all satellites and host
+    let maxLag = Math.max(hostPhysicalLag, 280); // 280ms baseline so phones have buffer
+    satelliteLagsRef.current.forEach((info) => {
+      if (info.physicalLagMs > maxLag) {
+        maxLag = info.physicalLagMs;
+      }
+    });
+
+    const targetMs = maxLag;
+    setFleetTargetMs(targetMs);
+
+    const newHostDelay = Math.max(0, targetMs - hostPhysicalLag);
+    console.log(`[Host] Fleet Sync: Target=${targetMs}ms | Host Lag=${hostPhysicalLag}ms (${hostOutputProfileRef.current}) → Host Delay=${newHostDelay}ms across ${satelliteLagsRef.current.size} satellites`);
+
+    setHostDelayMs(newHostDelay);
+    hostDelayMsRef.current = newHostDelay;
+
+    if (hostDelayNodeRef.current && audioContextRef.current) {
+      try {
+        const ctx = audioContextRef.current;
+        const now = ctx.currentTime;
+        hostDelayNodeRef.current.delayTime.cancelScheduledValues(now);
+        hostDelayNodeRef.current.delayTime.setTargetAtTime(newHostDelay / 1000, now, 0.035);
+      } catch (err) {
+        try {
+          hostDelayNodeRef.current.delayTime.value = newHostDelay / 1000;
+        } catch (e) {}
+      }
+    }
+
+    // Broadcast fleet target to ALL satellites so every device locks phase
+    activeConnectionsRef.current.forEach((c) => {
+      if (c.open) {
+        c.send({
+          type: 'FLEET_SYNC_TARGET',
+          fleetTargetMs: targetMs,
+          hostDelayMs: newHostDelay,
+          hostOutputProfile: hostOutputProfileRef.current
+        });
+      }
+    });
+  };
+
+  const handleHostProfileSelect = (profile) => {
+    setHostOutputProfile(profile);
+    hostOutputProfileRef.current = profile;
+    recalculateFleetSync();
+  };
+
   const handleDelayChange = (ms) => {
     const clamped = Math.max(0, Math.min(2000, ms));
     setHostDelayMs(clamped);
@@ -509,18 +569,17 @@ export default function HostView({ onBack }) {
       try {
         const ctx = audioContextRef.current;
         const now = ctx.currentTime;
-        hostDelayNodeRef.current.delayTime.cancelScheduledValues(0);
-        hostDelayNodeRef.current.delayTime.setValueAtTime(clamped / 1000, now);
-        console.log(`[Host] Host delay updated to ${clamped}ms`);
+        hostDelayNodeRef.current.delayTime.cancelScheduledValues(now);
+        hostDelayNodeRef.current.delayTime.setTargetAtTime(clamped / 1000, now, 0.035);
+        console.log(`[Host] Host delay updated smoothly to ${clamped}ms`);
       } catch (err) {
-        console.warn('[Host] Host delay update error, using fallback:', err);
         try {
           hostDelayNodeRef.current.delayTime.value = clamped / 1000;
         } catch (e) {}
       }
     }
 
-    // Debounced broadcast to satellites so they re-align (300ms debounce to avoid flooding during slider drag)
+    // Debounced broadcast to satellites so they re-align (250ms debounce to avoid flooding during slider drag)
     if (hostDelayBroadcastTimer.current) clearTimeout(hostDelayBroadcastTimer.current);
     hostDelayBroadcastTimer.current = setTimeout(() => {
       activeConnectionsRef.current.forEach((c) => {
@@ -528,7 +587,7 @@ export default function HostView({ onBack }) {
           c.send({ type: 'HOST_DELAY_UPDATE', hostDelayMs: clamped });
         }
       });
-    }, 300);
+    }, 250);
   };
 
   const stopBroadcasting = (fullTeardown = false) => {
@@ -802,6 +861,42 @@ export default function HostView({ onBack }) {
                 </>
               )}
             </button>
+          </div>
+
+          {/* Host Hardware Output Profile: Laptop Speakers vs Bluetooth Speaker */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                HOST AUDIO OUTPUT HARDWARE (LAPTOP / BLE SPEAKER):
+              </span>
+              <span className="paper-badge" style={{ fontSize: '10px', padding: '2px 6px', color: hostOutputProfile === 'bluetooth' ? 'var(--amber-bright)' : '#10b981' }}>
+                {hostOutputProfile === 'bluetooth' ? 'BLUETOOTH / BLE (+200MS BUFFER)' : 'INTERNAL / WIRED (0MS)'}
+              </span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+              <button
+                onClick={() => handleHostProfileSelect('internal')}
+                className={`btn-analog ${hostOutputProfile === 'internal' ? 'btn-amber' : ''}`}
+                style={{ padding: '8px', fontSize: '11px', justifyContent: 'center' }}
+              >
+                💻 Laptop Speakers (0ms)
+              </button>
+              <button
+                onClick={() => handleHostProfileSelect('bluetooth')}
+                className={`btn-analog ${hostOutputProfile === 'bluetooth' ? 'btn-amber' : ''}`}
+                style={{ padding: '8px', fontSize: '11px', justifyContent: 'center' }}
+              >
+                🔊 Laptop BLE/BT (+200ms)
+              </button>
+              <button
+                onClick={() => handleHostProfileSelect('aux')}
+                className={`btn-analog ${hostOutputProfile === 'aux' ? 'btn-amber' : ''}`}
+                style={{ padding: '8px', fontSize: '11px', justifyContent: 'center' }}
+              >
+                🔌 AUX Cable (0ms)
+              </button>
+            </div>
           </div>
 
           {/* Continuous Slider & Stepped Adjustments for Host Delay */}

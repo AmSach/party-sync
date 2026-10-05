@@ -16,6 +16,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const [isConnected, setIsConnected] = useState(false);
   const [isAudioActive, setIsAudioActive] = useState(false);
   const [delayMs, setDelayMs] = useState(0);
+  const [fineTuneMs, setFineTuneMs] = useState(0);
   const [hardwareProfile, setHardwareProfile] = useState('phone'); // 'phone' | 'bt_speaker' | 'bt_headphones' | 'aux'
   const [volume, setVolume] = useState(1.0);
   const [statusText, setStatusText] = useState('Receiver Standby');
@@ -30,7 +31,11 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   const wakeLockRef = useRef(null);
   const webrtcStreamRef = useRef(null);
   const activeCallRef = useRef(null);
-  const audioElRef = useRef(null);
+  const fineTuneMsRef = useRef(0);
+  const hardwareProfileRef = useRef('phone');
+  const myPhysicalLagRef = useRef(90);
+  const fleetTargetLagRef = useRef(300);
+  const syncKeeperIntervalRef = useRef(null);
 
   const requestWakeLock = async () => {
     try {
@@ -141,7 +146,18 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         requestWakeLock();
 
         // High-precision clock calibration burst on handshake
-        clockSync.startCalibration(conn);
+        clockSync.startCalibration(conn).then(() => {
+          sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+        });
+
+        // Background Sync Keeper: check clock periodically to prevent long-term crystal drift
+        if (syncKeeperIntervalRef.current) clearInterval(syncKeeperIntervalRef.current);
+        syncKeeperIntervalRef.current = setInterval(async () => {
+          if (connRef.current && connRef.current.open) {
+            await clockSync.startCalibration(connRef.current);
+            sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+          }
+        }, 15000);
       });
 
       conn.on('data', (data) => {
@@ -164,13 +180,25 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           // Fire scheduled acoustic tick & visual flash.
           // Target 'default' (ctx.destination) so clapper ALWAYS sounds even before audio stream connects
           clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash, 'default');
+        } else if (data.type === 'FLEET_SYNC_TARGET') {
+          // Master Fleet Target from Host
+          const fleetTargetMs = data.fleetTargetMs || 300;
+          fleetTargetLagRef.current = fleetTargetMs;
+          const myLag = myPhysicalLagRef.current;
+          const neededDelay = Math.max(0, fleetTargetMs - myLag);
+          console.log(`[Receiver] Fleet Target=${fleetTargetMs}ms - My Lag=${myLag}ms → Delay=${neededDelay}ms`);
+          setDelayMs(neededDelay);
+          audioProcessor.setDelay(neededDelay);
+          setAutoSyncStatus('done');
+          setAutoSyncMsg(`⚡ Fleet Phase-Locked (Target: ${fleetTargetMs}ms | Hardware Lag: ${myLag}ms [Profile: ${hardwareProfileRef.current}] → Delay Node: +${neededDelay}ms)`);
         } else if (data.type === 'CALIBRATE_TELEMETRY') {
-          applyTelemetrySync(data.hostDelayMs, data.rtt, data.laptopMuted);
+          if (data.fleetTargetMs) {
+            fleetTargetLagRef.current = data.fleetTargetMs;
+          }
+          sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
         } else if (data.type === 'HOST_DELAY_UPDATE') {
-          console.log('[Receiver] Host bumped delay to:', data.hostDelayMs, '→ re-aligning');
-          // Host bumped its delay (probably because we or another satellite requested it)
-          // Re-run sync with the new host delay so we align to the updated timing
-          applyTelemetrySync(data.hostDelayMs, clockSync.rtt || 10, false);
+          console.log('[Receiver] Host updated delay to:', data.hostDelayMs, '→ re-aligning fleet');
+          sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
         } else if (data.type === 'START_CALIBRATE_CLIENT') {
           performAutoSync();
         }
@@ -194,6 +222,18 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       console.log('[Receiver] Answering incoming audio stream from Host...');
       call.answer(undefined, { sdpTransform: configureHighFidelityAudioSDP });
 
+      // Constrain WebRTC NetEQ jitter buffer to prevent buffer ballooning and playout drift
+      if (call.peerConnection) {
+        try {
+          call.peerConnection.getReceivers().forEach(receiver => {
+            if (receiver.track && receiver.track.kind === 'audio') {
+              if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.04;
+              if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 40;
+            }
+          });
+        } catch (e) {}
+      }
+
       call.on('stream', (remoteAudioStream) => {
         console.log('[Receiver] Received remote audio stream track:', remoteAudioStream.getAudioTracks().length);
         
@@ -203,17 +243,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
           }
         });
 
-        // CRITICAL: Remote WebRTC streams in Chromium & Firefox require an active HTMLAudioElement
-        // to pull RTP packets from the network. Without this, createMediaStreamSource receives pure silence!
-        // The element MUST be permanently muted & volume 0 so it never produces double playback.
-        if (audioElRef.current) {
-          audioElRef.current.srcObject = remoteAudioStream;
-          audioElRef.current.muted = true;
-          audioElRef.current.volume = 0;
-          audioElRef.current.play().catch(e => console.warn('[Receiver] Stream activator notice:', e));
-        }
-
-        // Route audio exclusively through Web Audio API DelayNode pipeline
+        // Route audio through Web Audio API DelayNode pipeline (which manages the stream activator)
         audioProcessor.setupStream(remoteAudioStream);
 
         setIsAudioActive(true);
@@ -243,24 +273,61 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     peerRef.current = peer;
   };
 
-  const handleProfileSelect = (profile) => {
-    setHardwareProfile(profile);
-    let offset = 0;
+  const sendLagUpdateToHost = (profile = hardwareProfileRef.current, fineTune = fineTuneMsRef.current) => {
+    const effectiveRtt = clockSync.rtt > 0 ? clockSync.rtt : 10;
+    const oneWayTransit = effectiveRtt / 2;
+    const baseLat = (audioProcessor.ctx?.baseLatency || 0.015) * 1000;
+    const outLat = (audioProcessor.ctx?.outputLatency || 0.025) * 1000;
+    const totalDac = Math.round(baseLat + outLat);
+
+    let profileLag = 0;
     if (profile === 'bt_speaker') {
-      offset = 200; // Standard Bluetooth speaker SBC/AAC buffer latency compensation
+      profileLag = 200; // Standard Bluetooth speaker SBC/AAC buffer latency
     } else if (profile === 'bt_headphones') {
-      offset = 150; // Bluetooth earbud latency compensation
-    } else if (profile === 'phone' || profile === 'aux') {
-      offset = 0;
+      profileLag = 150; // Bluetooth earbud buffer latency
     }
-    setDelayMs(offset);
-    audioProcessor.setDelay(offset);
+
+    const physicalLag = Math.max(0, Math.round(oneWayTransit + 35 + totalDac + profileLag + fineTune));
+    myPhysicalLagRef.current = physicalLag;
+
+    console.log(`[Receiver] My Physical Lag: Transit=${Math.round(oneWayTransit)}ms + NetEQ=35ms + DAC=${totalDac}ms + Profile=${profileLag}ms (${profile}) + FineTune=${fineTune}ms = ${physicalLag}ms`);
+
+    // Calculate local delay needed against current fleet target
+    const currentFleetTarget = fleetTargetLagRef.current || 300;
+    const effectiveDelay = Math.max(0, currentFleetTarget - physicalLag);
+    setDelayMs(effectiveDelay);
+    audioProcessor.setDelay(effectiveDelay);
+
+    // Notify host so the fleet target expands if this device is slower
+    if (connRef.current && connRef.current.open) {
+      connRef.current.send({
+        type: 'SATELLITE_LAG_UPDATE',
+        satellitePhysicalLag: physicalLag,
+        profile,
+        fineTuneMs: fineTune,
+        deviceName
+      });
+    }
+
+    setAutoSyncStatus('done');
+    setAutoSyncMsg(`⚡ Fleet Synchronized (Hardware Lag: ${physicalLag}ms [Profile: ${profile}] | Delay Node: +${effectiveDelay}ms)`);
   };
 
-  const handleNudgeChange = (ms) => {
-    const clamped = Math.max(0, Math.min(1000, ms));
-    setDelayMs(clamped);
-    audioProcessor.setDelay(clamped);
+  const handleProfileSelect = (profile) => {
+    setHardwareProfile(profile);
+    hardwareProfileRef.current = profile;
+    sendLagUpdateToHost(profile, fineTuneMsRef.current);
+  };
+
+  const handleFineTuneChange = (val) => {
+    const clamped = Math.max(-300, Math.min(700, val));
+    setFineTuneMs(clamped);
+    fineTuneMsRef.current = clamped;
+    sendLagUpdateToHost(hardwareProfileRef.current, clamped);
+  };
+
+  const handleNudgeChange = (val) => {
+    handleFineTuneChange(val);
   };
 
   const handleVolumeChange = (vol) => {
@@ -270,7 +337,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
   const recalibrateClock = () => {
     if (connRef.current && connRef.current.open) {
-      clockSync.startCalibration(connRef.current);
+      clockSync.startCalibration(connRef.current).then(() => {
+        sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+      });
     }
   };
 
@@ -293,66 +362,21 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     // 1. Await high-precision 8-ping NTP calibration burst
     await clockSync.startCalibration(connRef.current);
 
-    // 2. Request host telemetry
-    connRef.current.send({ type: 'CALIBRATE_REQUEST' });
+    // 2. Transmit true latency to host and calibrate
+    sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+    triggerVisualFlash();
   };
 
   const applyTelemetrySync = (hostDelay = 350, rtt = 10, isHostMuted = false) => {
-    const effectiveRtt = rtt > 0 ? rtt : (clockSync.rtt || 10);
-    const oneWayTransit = effectiveRtt / 2;
-
-    // Direct hardware latency from browser Web Audio API
-    const baseLat = (audioProcessor.ctx?.baseLatency || 0.015) * 1000;
-    const outLat = (audioProcessor.ctx?.outputLatency || 0.025) * 1000;
-    const totalDac = Math.round(baseLat + outLat);
-
-    let profileOffset = 0;
-    if (hardwareProfile === 'bt_speaker') {
-      profileOffset = 200;
-    } else if (hardwareProfile === 'bt_headphones') {
-      profileOffset = 150;
-    }
-
-    let targetOffset = 0;
-    if (isHostMuted) {
-      // Party Mode (Host Muted): All satellites play as fast as possible with minimal delay
-      targetOffset = 0;
-    } else {
-      // Host Laptop Speaker Active:
-      // Host Total Latency = hostDelay (from host delay node) + 20ms (host DAC)
-      // Receiver Total Latency = oneWayTransit + 35ms (WebRTC jitter) + totalDac + profileOffset + targetOffset
-      // Target: Host Total == Receiver Total
-      const receiverBaseLatency = Math.round(oneWayTransit + 35 + totalDac + profileOffset);
-      const hostTotal = hostDelay + 20;
-
-      if (hostTotal < receiverBaseLatency) {
-        // CAN'T GO NEGATIVE — tell the host to delay itself to match this satellite's inherent latency
-        const neededHostDelay = receiverBaseLatency - 20; // subtract host DAC since host adds it
-        console.log(`[Receiver] Host delay ${hostDelay}ms too low for our latency ${receiverBaseLatency}ms → requesting host bump to ${neededHostDelay}ms`);
-        if (connRef.current && connRef.current.open) {
-          connRef.current.send({ 
-            type: 'REQUEST_HOST_DELAY', 
-            neededDelayMs: neededHostDelay,
-            receiverBaseLatency,
-            deviceName 
-          });
-        }
-        targetOffset = 0; // We play at zero additional delay — host will delay itself to match us
-      } else {
-        targetOffset = Math.min(2000, hostTotal - receiverBaseLatency);
-      }
-    }
-
-    setDelayMs(targetOffset);
-    audioProcessor.setDelay(targetOffset);
-
-    setAutoSyncStatus('done');
-    const syncDirection = targetOffset === 0 && !isHostMuted ? '⬆️ Host bumped to match' : `Phone: +${targetOffset}ms`;
-    setAutoSyncMsg(`⚡ Phase Locked! (Transit: ${Math.round(oneWayTransit)}ms | DAC: ${totalDac}ms | Host: ${hostDelay}ms → ${syncDirection})`);
+    sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
     triggerVisualFlash();
   };
 
   const disconnect = () => {
+    if (syncKeeperIntervalRef.current) {
+      clearInterval(syncKeeperIntervalRef.current);
+      syncKeeperIntervalRef.current = null;
+    }
     if (activeCallRef.current) {
       try { activeCallRef.current.close(); } catch (e) {}
       activeCallRef.current = null;
@@ -687,42 +711,48 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 <div>
                   <div style={{ fontSize: '12px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <Clock size={14} color="var(--accent-bright)" />
-                    Minute Manual Fine-Tuning:
+                    Precision Phase Nudge (Micro-Alignment):
                   </div>
                   <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                    Compensates for speaker processing and physical room distance
+                    Slide negative to advance this speaker earlier; slide positive to delay it
                   </div>
                 </div>
-                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: delayMs === 0 ? '#10b981' : 'var(--accent-bright)' }}>
-                  {delayMs === 0 ? '0ms (Fastest WebRTC)' : `+${delayMs}ms Delay`}
+                <span className="font-mono paper-badge" style={{ padding: '3px 8px', fontSize: '12px', color: fineTuneMs === 0 ? '#10b981' : 'var(--accent-bright)' }}>
+                  {fineTuneMs === 0 ? '0ms (Phase-Locked)' : `${fineTuneMs > 0 ? '+' : ''}${fineTuneMs}ms Nudge`}
                 </span>
               </div>
 
+              {/* Wide Range Bi-directional Fine Tuner: -300ms to +700ms */}
               <input 
                 type="range" 
-                min="0" 
-                max="1000" 
-                step="5"
-                value={delayMs} 
-                onChange={(e) => handleNudgeChange(parseInt(e.target.value))} 
+                min="-300" 
+                max="700" 
+                step="2"
+                value={fineTuneMs} 
+                onChange={(e) => handleFineTuneChange(parseInt(e.target.value))} 
               />
 
               {/* Stepped Coarse/Fine Alignment Buttons */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px' }}>
                 {[
-                  { label: '-50ms', val: delayMs - 50 },
-                  { label: '-10ms', val: delayMs - 10 },
-                  { label: '+10ms', val: delayMs + 10 },
-                  { label: '+50ms', val: delayMs + 50 },
+                  { label: '-100ms', val: fineTuneMs - 100 },
+                  { label: '-50ms', val: fineTuneMs - 50 },
+                  { label: '-20ms', val: fineTuneMs - 20 },
+                  { label: '0ms Reset', val: 0 },
+                  { label: '+20ms', val: fineTuneMs + 20 },
+                  { label: '+50ms', val: fineTuneMs + 50 },
+                  { label: '+100ms', val: fineTuneMs + 100 },
                 ].map(b => (
                   <button
                     key={b.label}
-                    onClick={() => handleNudgeChange(Math.max(0, Math.min(1000, b.val)))}
+                    onClick={() => handleFineTuneChange(b.val)}
                     className="btn-analog"
                     style={{
                       padding: '6px 2px',
-                      fontSize: '11px',
-                      fontFamily: 'monospace'
+                      fontSize: '10px',
+                      fontFamily: 'monospace',
+                      background: fineTuneMs === b.val ? 'var(--accent-core)' : undefined,
+                      color: fineTuneMs === b.val ? '#0f1419' : undefined
                     }}
                   >
                     {b.label}
@@ -730,24 +760,25 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 ))}
               </div>
 
+              {/* Quick Preset Jumps */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '4px' }}>
                 {[
-                  { label: '0ms Min', val: 0 },
+                  { label: '-150ms Earbuds', val: -150 },
+                  { label: '0ms Phase Lock', val: 0 },
                   { label: '+100ms', val: 100 },
-                  { label: '+200ms BT', val: 200 },
-                  { label: '+350ms', val: 350 },
-                  { label: '+500ms', val: 500 },
+                  { label: '+200ms BT Spkr', val: 200 },
+                  { label: '+350ms Heavy BT', val: 350 },
                 ].map(b => (
                   <button
                     key={b.label}
-                    onClick={() => handleNudgeChange(b.val)}
+                    onClick={() => handleFineTuneChange(b.val)}
                     className="btn-analog"
                     style={{
                       padding: '6px 2px',
                       fontSize: '10px',
                       fontFamily: 'monospace',
-                      background: delayMs === b.val ? 'var(--accent-core)' : undefined,
-                      color: delayMs === b.val ? '#0f1419' : undefined
+                      background: fineTuneMs === b.val ? 'var(--accent-core)' : undefined,
+                      color: fineTuneMs === b.val ? '#0f1419' : undefined
                     }}
                   >
                     {b.label}
@@ -756,9 +787,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
-                <span>0ms (Immediate)</span>
-                <span style={{ color: 'var(--accent-bright)' }}>Phase Synchronized</span>
-                <span>+1000ms (High Latency)</span>
+                <span>-300ms (Play Earlier / Signal Host)</span>
+                <span style={{ color: 'var(--accent-bright)' }}>Active Web Audio Delay: +{delayMs}ms</span>
+                <span>+700ms (High Latency Bluetooth)</span>
               </div>
             </div>
 
@@ -805,16 +836,6 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         )}
 
       </div>
-      
-      {/* Hidden Muted Audio Element: Required by Chromium & Firefox to pull incoming WebRTC RTP audio packets.
-          Kept 100% MUTED so it NEVER produces double playback or bypasses the Web Audio Delay pipeline. */}
-      <audio 
-        ref={audioElRef} 
-        autoPlay 
-        playsInline 
-        muted 
-        style={{ position: 'fixed', top: -9999, left: -9999, width: 1, height: 1, opacity: 0, pointerEvents: 'none' }} 
-      />
     </div>
   );
 }

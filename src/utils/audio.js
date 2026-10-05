@@ -125,11 +125,11 @@ class SyncedAudioProcessor {
 
     try {
       const now = this.ctx.currentTime;
-      // Wipe ANY previous scheduled events on delayTime to prevent DOMException collisions
-      this.delayNode.delayTime.cancelScheduledValues(0);
-      this.delayNode.delayTime.setValueAtTime(effectiveSec, now);
+      // Smooth 35ms exponential transition eliminates Web Audio ring-buffer pointer clicks, pops and dropped samples
+      this.delayNode.delayTime.cancelScheduledValues(now);
+      this.delayNode.delayTime.setTargetAtTime(effectiveSec, now, 0.035);
     } catch (err) {
-      console.warn('[AudioProcessor] setValueAtTime failed, using direct property assignment:', err);
+      console.warn('[AudioProcessor] setTargetAtTime failed, using direct property assignment:', err);
       try {
         this.delayNode.delayTime.value = effectiveSec;
       } catch (e) {}
