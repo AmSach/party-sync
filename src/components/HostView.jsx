@@ -4,20 +4,39 @@ import QRCode from 'qrcode';
 import { 
   Tv, Music, Monitor, Mic, Radio, Users, Sliders, Copy, 
   Check, Volume2, VolumeX, ShieldCheck, Play, Pause, RefreshCw, QrCode,
-  Zap, Clock, Wifi, Info, BellRing, Target
+  Zap, Clock, Wifi, Info, BellRing, Target, RotateCcw, Repeat, FileAudio, AlertCircle
 } from 'lucide-react';
 import { clockSync, ClockSynchronizer } from '../utils/clockSync';
 import { configureHighFidelityAudioSDP } from '../utils/sdp';
 import Visualizer from './Visualizer';
 
 export default function HostView({ onBack }) {
+  const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   const [roomId, setRoomId] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
-  const [sourceType, setSourceType] = useState('screen');
+  const [sourceType, setSourceType] = useState(isMobile ? 'file' : 'screen');
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [connectedPeers, setConnectedPeers] = useState([]);
   const [copied, setCopied] = useState(false);
   
+  // Mobile screen audio restriction modal
+  const [showMobileScreenModal, setShowMobileScreenModal] = useState(false);
+
+  // AudioBuffer in-memory playback state (Zero-delay, works 100% on iOS & Android)
+  const [fileAudioBuffer, setFileAudioBuffer] = useState(null);
+  const [isFilePlaying, setIsFilePlaying] = useState(false);
+  const [isFileDecoding, setIsFileDecoding] = useState(false);
+  const [fileDuration, setFileDuration] = useState(0);
+  const [fileCurrentTime, setFileCurrentTime] = useState(0);
+  const [isFileLooping, setIsFileLooping] = useState(true);
+
+  const audioBufferRef = useRef(null);
+  const bufferSourceNodeRef = useRef(null);
+  const bufferPlaybackStartRef = useRef(0);
+  const bufferPauseOffsetRef = useRef(0);
+  const fileProgressTimerRef = useRef(null);
+  const isFileLoopingRef = useRef(true);
+
   // Host local playback pipeline delay & mute controls
   const [laptopMuted, setLaptopMuted] = useState(true);
   const [hostDelayMs, setHostDelayMs] = useState(300); // 300ms default matches typical WebRTC transit latency
@@ -242,11 +261,161 @@ export default function HostView({ onBack }) {
 
   const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('firefox');
 
+  const ensureHostAudioNodes = (ctx) => {
+    if (!streamDestRef.current) {
+      const dest = ctx.createMediaStreamDestination();
+      dest.stream.getAudioTracks().forEach(track => {
+        if ('contentHint' in track) track.contentHint = 'music';
+      });
+      streamDestRef.current = dest;
+    }
+    if (!analyserRef.current) {
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyserRef.current = analyser;
+    }
+    if (!hostDelayNodeRef.current) {
+      const hostDelay = ctx.createDelay(3.0);
+      hostDelay.delayTime.setValueAtTime(hostDelayMsRef.current / 1000, ctx.currentTime);
+      hostDelayNodeRef.current = hostDelay;
+    }
+    if (!hostGainNodeRef.current) {
+      const hostGain = ctx.createGain();
+      hostGain.gain.setValueAtTime(laptopMuted ? 0 : 1.0, ctx.currentTime);
+      hostGainNodeRef.current = hostGain;
+      hostDelayNodeRef.current.connect(hostGain);
+      hostGain.connect(ctx.destination);
+    }
+  };
+
+  const playBufferAtOffset = (offset = 0) => {
+    const buffer = audioBufferRef.current;
+    if (!buffer) return;
+
+    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
+    audioContextRef.current = ctx;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    ensureHostAudioNodes(ctx);
+
+    if (bufferSourceNodeRef.current) {
+      try {
+        bufferSourceNodeRef.current.onended = null;
+        bufferSourceNodeRef.current.stop();
+        bufferSourceNodeRef.current.disconnect();
+      } catch (e) {}
+      bufferSourceNodeRef.current = null;
+    }
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = isFileLoopingRef.current;
+
+    // Route directly to WebRTC stream destination (for satellites)
+    source.connect(streamDestRef.current);
+    // Route to delayed host speaker pipeline (for host speakers to sync)
+    source.connect(hostDelayNodeRef.current);
+    // Route to visualizer
+    source.connect(analyserRef.current);
+
+    const safeOffset = Math.max(0, Math.min(buffer.duration - 0.05, offset));
+    source.start(0, safeOffset);
+    bufferSourceNodeRef.current = source;
+    bufferPlaybackStartRef.current = ctx.currentTime - safeOffset;
+    bufferPauseOffsetRef.current = safeOffset;
+    setIsFilePlaying(true);
+
+    source.onended = () => {
+      if (!isFileLoopingRef.current) {
+        setIsFilePlaying(false);
+        bufferPauseOffsetRef.current = 0;
+        setFileCurrentTime(0);
+        if (fileProgressTimerRef.current) {
+          clearInterval(fileProgressTimerRef.current);
+          fileProgressTimerRef.current = null;
+        }
+      }
+    };
+
+    audioStreamRef.current = streamDestRef.current.stream;
+    setIsBroadcasting(true);
+
+    activeConnectionsRef.current.forEach((conn, peerId) => {
+      callPeerWithStream(peerId, streamDestRef.current.stream);
+      if (conn.open) {
+        conn.send({ type: 'AUDIO_STARTED', title: activeMediaTitleRef.current });
+      }
+    });
+
+    if (fileProgressTimerRef.current) clearInterval(fileProgressTimerRef.current);
+    fileProgressTimerRef.current = setInterval(() => {
+      if (!audioContextRef.current || !audioBufferRef.current) return;
+      const cur = audioContextRef.current.currentTime - bufferPlaybackStartRef.current;
+      const dur = audioBufferRef.current.duration;
+      if (dur > 0) {
+        setFileCurrentTime(isFileLoopingRef.current ? (cur % dur) : Math.min(dur, cur));
+      }
+    }, 200);
+  };
+
+  const pauseBufferPlayback = () => {
+    if (bufferSourceNodeRef.current && audioContextRef.current) {
+      const elapsed = audioContextRef.current.currentTime - bufferPlaybackStartRef.current;
+      const dur = audioBufferRef.current?.duration || 1;
+      bufferPauseOffsetRef.current = isFileLoopingRef.current ? (elapsed % dur) : Math.min(dur, elapsed);
+      try {
+        bufferSourceNodeRef.current.onended = null;
+        bufferSourceNodeRef.current.stop();
+        bufferSourceNodeRef.current.disconnect();
+      } catch (e) {}
+      bufferSourceNodeRef.current = null;
+    }
+    if (fileProgressTimerRef.current) {
+      clearInterval(fileProgressTimerRef.current);
+      fileProgressTimerRef.current = null;
+    }
+    setIsFilePlaying(false);
+    activeConnectionsRef.current.forEach(conn => {
+      if (conn.open) conn.send({ type: 'AUDIO_STOPPED' });
+    });
+  };
+
+  const toggleFilePlayback = () => {
+    if (isFilePlaying) {
+      pauseBufferPlayback();
+    } else {
+      playBufferAtOffset(bufferPauseOffsetRef.current || 0);
+    }
+  };
+
+  const restartFilePlayback = () => {
+    bufferPauseOffsetRef.current = 0;
+    setFileCurrentTime(0);
+    playBufferAtOffset(0);
+  };
+
+  const toggleFileLoop = () => {
+    const nextLoop = !isFileLooping;
+    setIsFileLooping(nextLoop);
+    isFileLoopingRef.current = nextLoop;
+    if (bufferSourceNodeRef.current) {
+      bufferSourceNodeRef.current.loop = nextLoop;
+    }
+  };
+
   const startScreenCapture = async () => {
+    if (isMobile) {
+      setShowMobileScreenModal(true);
+      return;
+    }
     if (isFirefox) {
       setShowAudioMissingHelp(true);
       return;
     }
+
+    stopBroadcasting(false);
+    pauseBufferPlayback();
 
     try {
       const mediaStream = await navigator.mediaDevices.getDisplayMedia({
@@ -254,7 +423,7 @@ export default function HostView({ onBack }) {
           displaySurface: 'browser'
         },
         audio: {
-          suppressLocalAudioPlayback: true, // CRITICAL: Suppress tab's direct audio — play through our delayed Web Audio pipeline instead to sync with phones
+          suppressLocalAudioPlayback: true,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -276,10 +445,8 @@ export default function HostView({ onBack }) {
       setActiveMediaTitle(title);
       activeMediaTitleRef.current = title;
 
-      // Extract ONLY audio tracks to avoid wasting Wi-Fi bandwidth on video!
       const audioOnlyStream = new MediaStream(audioTracks);
 
-      // Listen for user ending screen capture via browser banner (without killing active session)
       mediaStream.getVideoTracks().forEach(track => {
         track.onended = () => {
           console.log('[Host] Native screen capture ended by user');
@@ -287,95 +454,101 @@ export default function HostView({ onBack }) {
         };
       });
 
-      // Screen capture: Tab audio is SUPPRESSED (suppressLocalAudioPlayback=true).
-      // Host plays through delayed Web Audio pipeline at configured host delay to sync with phones.
       setLaptopMuted(false);
-      setupHostAudio(audioOnlyStream, false); // false = DON'T mute host, play through delayed pipeline
+      setupHostAudio(audioOnlyStream, false);
     } catch (err) {
       console.error("[Host] Screen capture error:", err);
     }
   };
 
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0];
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
     if (!file) return;
 
-    // Clean up previous broadcast
+    // Clean up previous broadcast & buffer
     stopBroadcasting(false);
+    pauseBufferPlayback();
 
     setActiveMediaTitle(file.name);
     activeMediaTitleRef.current = file.name;
-    const fileUrl = URL.createObjectURL(file);
+    setIsFileDecoding(true);
+
+    try {
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
+      audioContextRef.current = ctx;
+      if (ctx.state === 'suspended') await ctx.resume();
+
+      if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+        try { navigator.audioSession.type = 'playback'; } catch (err) {}
+      }
+
+      const arrayBuffer = await file.arrayBuffer();
+      // Decode audio data reliably across all browsers (safely handles callback and promise API)
+      const decodedBuffer = await new Promise((resolve, reject) => {
+        ctx.decodeAudioData(arrayBuffer, resolve, reject);
+      });
+
+      audioBufferRef.current = decodedBuffer;
+      setFileAudioBuffer(decodedBuffer);
+      setFileDuration(decodedBuffer.duration);
+      setFileCurrentTime(0);
+      bufferPauseOffsetRef.current = 0;
+      setIsFileDecoding(false);
+
+      // Immediately play decoded audio through delayed host pipeline & broadcast
+      setLaptopMuted(false);
+      playBufferAtOffset(0);
+    } catch (err) {
+      console.error("[Host] Audio decoding failed:", err);
+      setIsFileDecoding(false);
+      alert("Failed to decode audio file. Please try another MP3, WAV, or AAC file.");
+    }
+  };
+
+  const startMicCapture = async () => {
+    stopBroadcasting(false);
+    pauseBufferPlayback();
+
+    try {
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2
+          }
+        });
+      } catch (e) {
+        // Fallback for mobile devices that do not support custom audio constraints
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+
+      setActiveMediaTitle("Live Room Mic / DJ Line-in");
+      activeMediaTitleRef.current = "Live Room Mic / DJ Line-in";
+      setLaptopMuted(true); // Mute host to prevent acoustic feedback squeal
+      setupHostAudio(stream, true);
+    } catch (err) {
+      console.error("[Host] Mic error:", err);
+      alert("Microphone permission denied or unavailable on this device.");
+    }
+  };
+
+  const startSynthGenerator = () => {
+    stopBroadcasting(false);
+    pauseBufferPlayback();
 
     const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
     const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
     audioContextRef.current = ctx;
     if (ctx.state === 'suspended') ctx.resume();
 
-    // Create an audio element for pristine audio decoding
-    if (!audioElementRef.current) {
-      const audioEl = new Audio();
-      audioEl.crossOrigin = 'anonymous';
-      audioElementRef.current = audioEl;
-    }
-    const audioEl = audioElementRef.current;
-    audioEl.src = fileUrl;
-    audioEl.loop = true;
+    ensureHostAudioNodes(ctx);
+    const dest = streamDestRef.current;
 
-    if (!mediaElementSourceRef.current) {
-      mediaElementSourceRef.current = ctx.createMediaElementSource(audioEl);
-    }
-    const sourceNode = mediaElementSourceRef.current;
-
-    if (!streamDestRef.current) {
-      streamDestRef.current = ctx.createMediaStreamDestination();
-    }
-    const streamDest = streamDestRef.current;
-
-    try { sourceNode.disconnect(); } catch (err) {}
-
-    // Visualizer
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 128;
-    sourceNode.connect(analyser);
-    analyserRef.current = analyser;
-
-    // Route to WebRTC broadcast destination
-    sourceNode.connect(streamDest);
-
-    audioEl.play().catch(err => console.error("[Host] Audio playback error:", err));
-
-    // Broadcast audio-only stream to satellites & configure delayed host playback
-    setLaptopMuted(false);
-    setupHostAudio(streamDest.stream, false);
-  };
-
-  const startMicCapture = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: 48000,
-          channelCount: 2
-        }
-      });
-      setActiveMediaTitle("Live Room Mic / DJ Line-in");
-      activeMediaTitleRef.current = "Live Room Mic / DJ Line-in";
-      setLaptopMuted(true); // Mute host to prevent feedback loop
-      setupHostAudio(stream, true);
-    } catch (err) {
-      console.error("[Host] Mic error:", err);
-    }
-  };
-
-  const startSynthGenerator = () => {
-    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive', sampleRate: 48000 });
-    audioContextRef.current = ctx;
-    if (ctx.state === 'suspended') ctx.resume();
-
-    const dest = ctx.createMediaStreamDestination();
     let step = 0;
     const notes = [110, 130.81, 146.83, 164.81, 196, 220, 261.63];
 
@@ -391,25 +564,37 @@ export default function HostView({ onBack }) {
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
 
       osc.connect(gain);
+      // Route directly to WebRTC broadcast stream destination (for satellites)
       gain.connect(dest);
+      // Route directly to delayed host speaker pipeline (for host speakers to sync)
+      gain.connect(hostDelayNodeRef.current);
+      // Route to visualizer
+      gain.connect(analyserRef.current);
 
       osc.start();
       osc.stop(ctx.currentTime + 0.24);
       step++;
     }, 240);
 
-    setActiveMediaTitle("Warm Analog Lofi Chords (Test Loop)");
-    activeMediaTitleRef.current = "Warm Analog Lofi Chords (Test Loop)";
-    setLaptopMuted(false); // Enable laptop playback for synth!
-    setupHostAudio(dest.stream, false);
+    const title = "Warm Analog Lofi Chords (Test Loop)";
+    setActiveMediaTitle(title);
+    activeMediaTitleRef.current = title;
+    setLaptopMuted(false);
+    audioStreamRef.current = dest.stream;
+    setIsBroadcasting(true);
+
+    activeConnectionsRef.current.forEach((conn, peerId) => {
+      callPeerWithStream(peerId, dest.stream);
+      if (conn.open) {
+        conn.send({ type: 'AUDIO_STARTED', title });
+      }
+    });
   };
 
-  const setupHostAudio = (stream, isScreenCapture = false) => {
+  const setupHostAudio = (stream, isMic = false) => {
     audioStreamRef.current = stream;
     setIsBroadcasting(true);
 
-    // CRITICAL: Set contentHint = 'music' on all tracks!
-    // Disables browser speech filtering, prevents treble/bass cutoff, and switches Opus to full-band CELT music mode!
     stream.getAudioTracks().forEach(track => {
       if ('contentHint' in track) {
         track.contentHint = 'music';
@@ -438,45 +623,23 @@ export default function HostView({ onBack }) {
       audioContextRef.current = ctx;
       if (ctx.state === 'suspended') ctx.resume();
 
+      ensureHostAudioNodes(ctx);
+
       if (hostSourceNodeRef.current) {
         try { hostSourceNodeRef.current.disconnect(); } catch (e) {}
-      }
-      if (hostDelayNodeRef.current) {
-        try { hostDelayNodeRef.current.disconnect(); } catch (e) {}
-      }
-      if (hostGainNodeRef.current) {
-        try { hostGainNodeRef.current.disconnect(); } catch (e) {}
       }
 
       const source = ctx.createMediaStreamSource(stream);
       hostSourceNodeRef.current = source;
 
-      // Visualizer Analyser
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 128;
-      source.connect(analyser);
-      analyserRef.current = analyser;
+      // Connect to visualizer and delayed host speaker pipeline
+      source.connect(analyserRef.current);
+      source.connect(hostDelayNodeRef.current);
 
-      // DELAY NODE: Delays Host Laptop speaker playback to sync with phones.
-      // Without this delay, laptop plays at T=0 while phones play at T+300ms via WebRTC.
-      // Supports up to 3.0s (3000ms) delay for high-latency Wi-Fi and Bluetooth pipelines.
-      const hostDelay = ctx.createDelay(3.0);
-      const currentDelayMs = hostDelayMsRef.current;
-      hostDelay.delayTime.setValueAtTime(currentDelayMs / 1000, ctx.currentTime);
-      hostDelayNodeRef.current = hostDelay;
-      console.log(`[Host] Delay pipeline set to ${currentDelayMs}ms`);
-
-      // GAIN NODE: For muting laptop speakers
-      const hostGain = ctx.createGain();
-      const shouldMute = isScreenCapture ? false : false; // Screen capture uses delayed host playback (tab is muted by suppressLocalAudioPlayback)
-      setLaptopMuted(shouldMute);
-      hostGain.gain.setValueAtTime(shouldMute ? 0 : 1.0, ctx.currentTime);
-      hostGainNodeRef.current = hostGain;
-
-      // Clean Bit-Perfect Direct Audio Pipeline (ZERO COMPRESSOR - prevents treble squashing and muffling)
-      source.connect(hostDelay);
-      hostDelay.connect(hostGain);
-      hostGain.connect(ctx.destination);
+      setLaptopMuted(isMic);
+      if (hostGainNodeRef.current) {
+        hostGainNodeRef.current.gain.setValueAtTime(isMic ? 0 : 1.0, ctx.currentTime);
+      }
     } catch (e) {
       console.warn("[Host] Audio pipeline notice:", e);
     }
@@ -601,6 +764,19 @@ export default function HostView({ onBack }) {
       clearInterval(synthIntervalRef.current);
       synthIntervalRef.current = null;
     }
+    if (bufferSourceNodeRef.current) {
+      try {
+        bufferSourceNodeRef.current.onended = null;
+        bufferSourceNodeRef.current.stop();
+        bufferSourceNodeRef.current.disconnect();
+      } catch (e) {}
+      bufferSourceNodeRef.current = null;
+    }
+    if (fileProgressTimerRef.current) {
+      clearInterval(fileProgressTimerRef.current);
+      fileProgressTimerRef.current = null;
+    }
+    setIsFilePlaying(false);
     if (audioElementRef.current) {
       audioElementRef.current.pause();
       audioElementRef.current.src = '';
@@ -774,29 +950,59 @@ export default function HostView({ onBack }) {
 
           <div className="input-channels-grid">
             <button 
-              onClick={() => { setSourceType('screen'); startScreenCapture(); }}
+              onClick={() => {
+                if (isMobile) {
+                  setShowMobileScreenModal(true);
+                } else {
+                  setSourceType('screen');
+                  startScreenCapture();
+                }
+              }}
               className={`btn-analog ${sourceType === 'screen' && isBroadcasting ? 'btn-amber' : ''}`}
-              style={{ padding: '14px', justifyContent: 'flex-start' }}
+              style={{ padding: '14px', justifyContent: 'flex-start', position: 'relative' }}
             >
               <Monitor size={18} />
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontSize: '13px', fontWeight: '600' }}>Screen / Tab Loopback</div>
-                <div style={{ fontSize: '11px', color: isFirefox ? 'var(--amber-bright)' : 'rgba(244, 239, 230, 0.7)' }}>
-                  {isFirefox ? '⚠️ Chrome / Edge needed for Tab Audio' : 'Spotify, Netflix, YouTube'}
+                <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  Screen / Tab Loopback
+                  {isMobile && (
+                    <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 5px', color: 'var(--amber-bright)' }}>
+                      LAPTOP ONLY
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: '11px', color: isMobile ? 'var(--amber-bright)' : isFirefox ? 'var(--amber-bright)' : 'rgba(244, 239, 230, 0.7)' }}>
+                  {isMobile 
+                    ? '📱 Mobile OS blocks Spotify/Tab audio' 
+                    : isFirefox 
+                    ? '⚠️ Chrome / Edge needed for Tab Audio' 
+                    : 'Spotify, Netflix, YouTube'}
                 </div>
               </div>
             </button>
 
             <label 
-              className={`btn-analog ${sourceType === 'file' && isBroadcasting ? 'btn-amber' : ''}`}
+              className={`btn-analog ${sourceType === 'file' && (isBroadcasting || audioBufferRef.current) ? 'btn-amber' : ''}`}
               style={{ padding: '14px', justifyContent: 'flex-start', cursor: 'pointer' }}
             >
               <Music size={18} />
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontSize: '13px', fontWeight: '600' }}>Local Audio / Movie File</div>
-                <div style={{ fontSize: '11px', opacity: 0.7 }}>MP3, WAV, MP4</div>
+                <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  Local Audio / Music File
+                  {isMobile && (
+                    <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 5px', color: '#10b981' }}>
+                      RECOMMENDED
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: '11px', opacity: 0.7 }}>MP3, WAV, M4A, FLAC, AAC</div>
               </div>
-              <input type="file" accept="audio/*,video/*" onChange={(e) => { setSourceType('file'); handleFileUpload(e); }} style={{ display: 'none' }} />
+              <input 
+                type="file" 
+                accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
+                onChange={(e) => { setSourceType('file'); handleFileUpload(e); }} 
+                style={{ display: 'none' }} 
+              />
             </label>
 
             <button 
@@ -823,6 +1029,126 @@ export default function HostView({ onBack }) {
               </div>
             </button>
           </div>
+
+          {/* DEDICATED TAPE DECK MUSIC PLAYER (When audio file is loaded or decoding) */}
+          {sourceType === 'file' && (
+            <div className="analog-inset" style={{ 
+              padding: '16px', 
+              display: 'flex', 
+              flexDirection: 'column', 
+              gap: '12px',
+              border: '1px solid var(--amber-glow)',
+              background: '#0d1218'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <FileAudio size={16} color="var(--amber-bright)" />
+                  <strong style={{ fontSize: '13px', color: 'var(--text-cream)' }}>
+                    {activeMediaTitleRef.current !== 'No audio source selected' ? activeMediaTitleRef.current : 'No audio file selected yet'}
+                  </strong>
+                </div>
+
+                <label className="btn-analog" style={{ padding: '5px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                  <span>📂 Choose Another File</span>
+                  <input 
+                    type="file" 
+                    accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
+                    onChange={(e) => { handleFileUpload(e); }} 
+                    style={{ display: 'none' }} 
+                  />
+                </label>
+              </div>
+
+              {isFileDecoding ? (
+                <div style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  gap: '8px', 
+                  padding: '12px', 
+                  fontSize: '12px', 
+                  color: 'var(--amber-bright)',
+                  fontFamily: 'monospace' 
+                }}>
+                  <RefreshCw size={14} className="spin-slow" />
+                  <span>DECODING PCM AUDIO INTO MEMORY (ZERO-BUFFER STREAMING)...</span>
+                </div>
+              ) : fileAudioBuffer ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {/* Timeline Bar */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span className="font-mono" style={{ fontSize: '11px', color: 'var(--amber-bright)', minWidth: '40px' }}>
+                      {(() => {
+                        const m = Math.floor(fileCurrentTime / 60);
+                        const s = Math.floor(fileCurrentTime % 60);
+                        return `${m}:${s < 10 ? '0' : ''}${s}`;
+                      })()}
+                    </span>
+
+                    <div style={{ 
+                      flex: 1, 
+                      height: '6px', 
+                      background: 'rgba(255,255,255,0.1)', 
+                      borderRadius: '3px', 
+                      overflow: 'hidden',
+                      position: 'relative'
+                    }}>
+                      <div style={{ 
+                        width: `${fileDuration > 0 ? (fileCurrentTime / fileDuration) * 100 : 0}%`, 
+                        height: '100%', 
+                        background: 'var(--amber-bright)',
+                        transition: 'width 0.2s linear'
+                      }} />
+                    </div>
+
+                    <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)', minWidth: '40px' }}>
+                      {(() => {
+                        const m = Math.floor(fileDuration / 60);
+                        const s = Math.floor(fileDuration % 60);
+                        return `${m}:${s < 10 ? '0' : ''}${s}`;
+                      })()}
+                    </span>
+                  </div>
+
+                  {/* Playback Transport Buttons */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <button 
+                      onClick={toggleFilePlayback}
+                      className="btn-analog btn-amber"
+                      style={{ padding: '8px 16px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      {isFilePlaying ? <Pause size={14} /> : <Play size={14} />}
+                      <span>{isFilePlaying ? 'Pause Broadcast' : 'Resume Broadcast'}</span>
+                    </button>
+
+                    <button 
+                      onClick={restartFilePlayback}
+                      className="btn-analog"
+                      style={{ padding: '8px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                      title="Restart track from beginning"
+                    >
+                      <RotateCcw size={14} />
+                      <span>Restart</span>
+                    </button>
+
+                    <button 
+                      onClick={toggleFileLoop}
+                      className={`btn-analog ${isFileLooping ? 'btn-amber' : ''}`}
+                      style={{ padding: '8px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                      title="Toggle auto-looping"
+                    >
+                      <Repeat size={14} />
+                      <span>{isFileLooping ? 'Loop: ON' : 'Loop: OFF'}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ textAlign: 'center', padding: '10px', fontSize: '12px', color: 'var(--text-dim)' }}>
+                  Tap "Local Audio / Music File" or click above to pick an MP3/WAV/FLAC track from your device.
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* PRECISION SYNCHRONIZATION & LAPTOP SPEAKER CONTROL DECK */}
@@ -1204,6 +1530,114 @@ export default function HostView({ onBack }) {
                 style={{ padding: '12px', fontSize: '13px' }}
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile Screen Loopback Restriction Guidance Modal */}
+      {showMobileScreenModal && (
+        <div 
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            backdropFilter: 'blur(8px)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px'
+          }}
+          onClick={() => setShowMobileScreenModal(false)}
+        >
+          <div 
+            className="analog-deck" 
+            style={{ 
+              maxWidth: '480px', 
+              width: '100%', 
+              padding: '24px', 
+              display: 'flex', 
+              flexDirection: 'column', 
+              gap: '16px',
+              border: '1px solid var(--amber-bright)',
+              boxShadow: '0 0 35px var(--amber-glow)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{
+                width: '36px',
+                height: '36px',
+                borderRadius: '8px',
+                background: 'rgba(245, 158, 11, 0.15)',
+                border: '1px solid var(--amber-bright)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--amber-bright)'
+              }}>
+                <Monitor size={20} />
+              </div>
+              <div>
+                <h3 className="font-serif" style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-cream)' }}>
+                  Laptop / Desktop Needed for Tab Audio
+                </h3>
+                <span className="font-mono" style={{ fontSize: '10px', color: 'var(--amber-bright)', letterSpacing: '1px' }}>
+                  MOBILE OS SANDBOX RESTRICTION
+                </span>
+              </div>
+            </div>
+
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.6' }}>
+              <p style={{ marginBottom: '10px' }}>
+                Both <strong>Apple (iOS)</strong> and <strong>Google (Android)</strong> forbid mobile web browsers from recording audio from other native apps (like Spotify, YouTube, or Netflix).
+              </p>
+              <div style={{ background: '#0e141a', padding: '14px', borderRadius: '10px', border: '1px solid var(--border-deck)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                  <span style={{ color: 'var(--amber-bright)', fontWeight: 'bold' }}>Option A:</span>
+                  <span style={{ color: 'var(--text-cream)' }}>
+                    <strong>Upload your MP3 / Music File:</strong> Tap <em>"Choose Audio File"</em> below to broadcast any song or audio file directly from your phone in perfect sync!
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                  <span style={{ color: 'var(--amber-bright)', fontWeight: 'bold' }}>Option B:</span>
+                  <span style={{ color: 'var(--text-cream)' }}>
+                    <strong>Use your PC or Laptop as Host:</strong> Open PartySync in Chrome or Edge on your laptop to stream Spotify tabs or Netflix movies.
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <label 
+                className="btn-analog btn-amber" 
+                style={{ flex: 1, padding: '12px', fontSize: '13px', textAlign: 'center', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+              >
+                <Music size={15} />
+                <span>Choose Audio File</span>
+                <input 
+                  type="file" 
+                  accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
+                  onChange={(e) => { 
+                    setShowMobileScreenModal(false); 
+                    setSourceType('file'); 
+                    handleFileUpload(e); 
+                  }} 
+                  style={{ display: 'none' }} 
+                />
+              </label>
+
+              <button 
+                onClick={() => setShowMobileScreenModal(false)} 
+                className="btn-analog" 
+                style={{ padding: '12px 18px', fontSize: '13px' }}
+              >
+                Got It
               </button>
             </div>
           </div>

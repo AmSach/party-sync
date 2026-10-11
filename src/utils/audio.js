@@ -16,6 +16,13 @@ class SyncedAudioProcessor {
   }
 
   init() {
+    // Configure iOS 17+ / mobile browser playback audio session (bypasses iPhone physical mute switch)
+    if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+      try {
+        navigator.audioSession.type = 'playback';
+      } catch (e) {}
+    }
+
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
@@ -23,6 +30,7 @@ class SyncedAudioProcessor {
     if (this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
     }
+
     // Mobile unlock: play a 1-sample silent buffer to unlock audio hardware pipeline
     try {
       const buffer = this.ctx.createBuffer(1, 1, 22050);
@@ -31,6 +39,49 @@ class SyncedAudioProcessor {
       source.connect(this.ctx.destination);
       source.start(0);
     } catch (e) {}
+
+    // Mobile & WebRTC stream activator: Pre-create and warm up during user touch gesture
+    if (typeof document !== 'undefined' && !this.streamActivator) {
+      try {
+        const audio = document.createElement('audio');
+        audio.id = 'party-sync-stream-activator';
+        audio.autoplay = true;
+        audio.playsInline = true;
+        audio.muted = true;
+        audio.volume = 0;
+        audio.setAttribute('playsinline', 'true');
+        audio.setAttribute('webkit-playsinline', 'true');
+        audio.style.position = 'fixed';
+        audio.style.opacity = '0';
+        audio.style.pointerEvents = 'none';
+        audio.style.width = '1px';
+        audio.style.height = '1px';
+        audio.style.bottom = '0';
+        audio.style.left = '0';
+        document.body.appendChild(audio);
+
+        // Warm up with tiny silent WAV to authorize audio playback on mobile OS
+        audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAD//w8A';
+        audio.play().catch(() => {});
+        this.streamActivator = audio;
+      } catch (e) {
+        console.warn('[AudioProcessor] Pre-warming activator notice:', e);
+      }
+    }
+  }
+
+  unlock() {
+    if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+      try {
+        navigator.audioSession.type = 'playback';
+      } catch (e) {}
+    }
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+    if (this.streamActivator) {
+      this.streamActivator.play().catch(() => {});
+    }
   }
 
   setupStream(mediaStream) {
@@ -46,20 +97,16 @@ class SyncedAudioProcessor {
       this.ctx.resume().catch(() => {});
     }
 
-    // CRITICAL: In Chromium and Firefox, remote WebRTC MediaStreams require an active HTMLAudioElement
-    // to pull RTP packets from the network into the browser's decoding engine.
-    // Without this, createMediaStreamSource receives pure silence!
-    // The element MUST be permanently muted & volume 0 so it never produces double playback.
-    if (typeof Audio !== 'undefined') {
+    // Pull RTP packets from the network into the browser's decoding engine.
+    if (this.streamActivator) {
       try {
-        if (!this.streamActivator) {
-          this.streamActivator = new Audio();
-          this.streamActivator.autoplay = true;
-          this.streamActivator.muted = true;
-          this.streamActivator.volume = 0;
-        }
         this.streamActivator.srcObject = mediaStream;
-        this.streamActivator.play().catch(() => {});
+        const playPromise = this.streamActivator.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((err) => {
+            console.warn('[AudioProcessor] Stream activator play notice (user interaction required):', err);
+          });
+        }
       } catch (e) {
         console.warn('[AudioProcessor] Stream activator notice:', e);
       }

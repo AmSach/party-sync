@@ -53,6 +53,8 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     isConnectedRef.current = isConnected;
   }, [isConnected]);
 
+  const [needsUserGesture, setNeedsUserGesture] = useState(false);
+
   useEffect(() => {
     if (initialRoomId) {
       setRoomId(initialRoomId);
@@ -65,33 +67,44 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     };
 
     const unlockAudio = () => {
-      if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
-        audioProcessor.ctx.resume().catch(() => {});
+      audioProcessor.unlock();
+      if (audioProcessor.ctx && audioProcessor.ctx.state === 'running') {
+        setNeedsUserGesture(false);
       }
     };
     window.addEventListener('click', unlockAudio);
     window.addEventListener('touchstart', unlockAudio);
+    window.addEventListener('pointerdown', unlockAudio);
 
     const handleVisibilityChange = async () => {
       if (document.visibilityState === 'visible') {
-        if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
-          try { await audioProcessor.ctx.resume(); } catch (e) {}
-        }
+        audioProcessor.unlock();
         if (wakeLockRef.current === null && isConnectedRef.current) {
           requestWakeLock();
         }
       }
     };
 
+    // Periodic check to detect if mobile OS suspended audio context
+    const checkCtxInterval = setInterval(() => {
+      if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended' && isAudioActive) {
+        setNeedsUserGesture(true);
+      } else if (audioProcessor.ctx && audioProcessor.ctx.state === 'running') {
+        setNeedsUserGesture(false);
+      }
+    }, 2000);
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      clearInterval(checkCtxInterval);
       window.removeEventListener('click', unlockAudio);
       window.removeEventListener('touchstart', unlockAudio);
+      window.removeEventListener('pointerdown', unlockAudio);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       disconnect();
     };
-  }, []);
+  }, [isAudioActive]);
 
   const triggerVisualFlash = () => {
     setIsFlashing(true);
@@ -248,6 +261,9 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
         setIsAudioActive(true);
         setStatusText('● Live Synchronized Studio Playout');
+        if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
+          setNeedsUserGesture(true);
+        }
       });
 
       call.on('close', () => {
@@ -497,6 +513,28 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         ) : (
           /* Active Speaker Deck */
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+            {needsUserGesture && (
+              <button
+                onClick={() => { audioProcessor.unlock(); setNeedsUserGesture(false); }}
+                className="btn-analog btn-amber"
+                style={{
+                  padding: '14px',
+                  fontSize: '13px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  border: '2px solid var(--amber-bright)',
+                  boxShadow: '0 0 25px var(--amber-core)',
+                  cursor: 'pointer',
+                  width: '100%'
+                }}
+              >
+                <Volume2 size={18} />
+                <span>🔊 TAP HERE TO UNMUTE AUDIO (Mobile Autoplay Protection)</span>
+              </button>
+            )}
             
             {/* Live Wi-Fi Mesh & Precision Clock Telemetry Banner */}
             <div style={{
