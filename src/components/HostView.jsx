@@ -19,8 +19,8 @@ export default function HostView({ onBack }) {
   const [connectedPeers, setConnectedPeers] = useState([]);
   const [copied, setCopied] = useState(false);
   
-  // Mobile screen audio restriction modal
-  const [showMobileScreenModal, setShowMobileScreenModal] = useState(false);
+  // System audio capture & browser popup guide modal
+  const [showScreenCaptureGuideModal, setShowScreenCaptureGuideModal] = useState(false);
 
   // AudioBuffer in-memory playback state (Zero-delay, works 100% on iOS & Android)
   const [fileAudioBuffer, setFileAudioBuffer] = useState(null);
@@ -36,6 +36,7 @@ export default function HostView({ onBack }) {
   const bufferPauseOffsetRef = useRef(0);
   const fileProgressTimerRef = useRef(null);
   const isFileLoopingRef = useRef(true);
+  const displayMediaStreamRef = useRef(null);
 
   // Host local playback pipeline delay & mute controls
   const [laptopMuted, setLaptopMuted] = useState(true);
@@ -404,61 +405,84 @@ export default function HostView({ onBack }) {
     }
   };
 
-  const startScreenCapture = async () => {
-    if (isMobile) {
-      setShowMobileScreenModal(true);
-      return;
-    }
-    if (isFirefox) {
-      setShowAudioMissingHelp(true);
-      return;
-    }
+  const startScreenCapture = () => {
+    // Show pre-flight interactive popup so user knows to check the "Share audio" box
+    setShowScreenCaptureGuideModal(true);
+  };
 
+  const executeScreenCapture = async () => {
+    setShowScreenCaptureGuideModal(false);
+    setShowAudioMissingHelp(false);
     stopBroadcasting(false);
     pauseBufferPlayback();
 
+    let mediaStream;
     try {
-      const mediaStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          displaySurface: 'browser'
-        },
+      // 1. First attempt: standard system audio capture constraints
+      mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
         audio: {
-          suppressLocalAudioPlayback: true,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
           channelCount: 2
         },
         systemAudio: 'include',
+        selfBrowserSurface: 'include',
         surfaceSwitching: 'include'
       });
-
-      const audioTracks = mediaStream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        mediaStream.getTracks().forEach(t => t.stop());
-        setShowAudioMissingHelp(true);
+    } catch (firstErr) {
+      console.warn('[Host] Advanced getDisplayMedia constraints failed, trying universal fallback:', firstErr);
+      try {
+        // 2. Second attempt: broadest possible video+audio constraints (works on Android Chrome and all platforms)
+        mediaStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+          systemAudio: 'include'
+        });
+      } catch (secondErr) {
+        console.warn('[Host] Screen capture cancelled or failed:', secondErr);
         return;
       }
-
-      setShowAudioMissingHelp(false);
-      const title = mediaStream.getVideoTracks()[0]?.label || "Desktop / Movie Audio Loopback";
-      setActiveMediaTitle(title);
-      activeMediaTitleRef.current = title;
-
-      const audioOnlyStream = new MediaStream(audioTracks);
-
-      mediaStream.getVideoTracks().forEach(track => {
-        track.onended = () => {
-          console.log('[Host] Native screen capture ended by user');
-          stopBroadcasting(false);
-        };
-      });
-
-      setLaptopMuted(false);
-      setupHostAudio(audioOnlyStream, false);
-    } catch (err) {
-      console.error("[Host] Screen capture error:", err);
     }
+
+    if (!mediaStream) return;
+
+    const audioTracks = mediaStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      // User forgot to check "Share system audio" / "Also share tab audio" in the browser popup
+      mediaStream.getTracks().forEach(t => t.stop());
+      setShowAudioMissingHelp(true);
+      return;
+    }
+
+    setShowAudioMissingHelp(false);
+    const title = mediaStream.getVideoTracks()[0]?.label || "System Audio Loopback";
+    setActiveMediaTitle(title);
+    activeMediaTitleRef.current = title;
+
+    // CRITICAL: Set contentHint = 'music' on all audio tracks
+    audioTracks.forEach(t => {
+      if ('contentHint' in t) t.contentHint = 'music';
+    });
+
+    // CRITICAL FIX: Keep video track enabled=false instead of stopping it,
+    // so Chrome does NOT kill the entire capture session!
+    mediaStream.getVideoTracks().forEach(track => {
+      track.enabled = false;
+      track.onended = () => {
+        console.log('[Host] Native screen capture ended by user');
+        stopBroadcasting(false);
+      };
+    });
+
+    displayMediaStreamRef.current = mediaStream;
+
+    // Create audio-only stream for WebRTC broadcast & host delayed playback
+    const audioOnlyStream = new MediaStream(audioTracks);
+
+    setLaptopMuted(false);
+    setupHostAudio(audioOnlyStream, false);
   };
 
   const handleFileUpload = async (e) => {
@@ -785,6 +809,10 @@ export default function HostView({ onBack }) {
       audioStreamRef.current.getTracks().forEach(t => t.stop());
       audioStreamRef.current = null;
     }
+    if (displayMediaStreamRef.current) {
+      displayMediaStreamRef.current.getTracks().forEach(t => t.stop());
+      displayMediaStreamRef.current = null;
+    }
 
     if (hostSourceNodeRef.current) {
       try { hostSourceNodeRef.current.disconnect(); } catch (e) {}
@@ -951,12 +979,8 @@ export default function HostView({ onBack }) {
           <div className="input-channels-grid">
             <button 
               onClick={() => {
-                if (isMobile) {
-                  setShowMobileScreenModal(true);
-                } else {
-                  setSourceType('screen');
-                  startScreenCapture();
-                }
+                setSourceType('screen');
+                startScreenCapture();
               }}
               className={`btn-analog ${sourceType === 'screen' && isBroadcasting ? 'btn-amber' : ''}`}
               style={{ padding: '14px', justifyContent: 'flex-start', position: 'relative' }}
@@ -964,19 +988,13 @@ export default function HostView({ onBack }) {
               <Monitor size={18} />
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  Screen / Tab Loopback
-                  {isMobile && (
-                    <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 5px', color: 'var(--amber-bright)' }}>
-                      LAPTOP ONLY
-                    </span>
-                  )}
+                  System & Screen Audio
+                  <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 5px', color: 'var(--amber-bright)' }}>
+                    SPOTIFY / TABS
+                  </span>
                 </div>
-                <div style={{ fontSize: '11px', color: isMobile ? 'var(--amber-bright)' : isFirefox ? 'var(--amber-bright)' : 'rgba(244, 239, 230, 0.7)' }}>
-                  {isMobile 
-                    ? '📱 Mobile OS blocks Spotify/Tab audio' 
-                    : isFirefox 
-                    ? '⚠️ Chrome / Edge needed for Tab Audio' 
-                    : 'Spotify, Netflix, YouTube'}
+                <div style={{ fontSize: '11px', color: 'rgba(244, 239, 230, 0.7)' }}>
+                  Capture system sound, Spotify, movies & tabs
                 </div>
               </div>
             </button>
@@ -1506,20 +1524,18 @@ export default function HostView({ onBack }) {
             )}
 
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              {!isFirefox && (
-                <button 
-                  onClick={() => { setShowAudioMissingHelp(false); startScreenCapture(); }} 
-                  className="btn-analog btn-amber" 
-                  style={{ flex: 1, padding: '12px', fontSize: '13px' }}
-                >
-                  🔄 Try Again (Open Popup)
-                </button>
-              )}
+              <button 
+                onClick={() => { setShowAudioMissingHelp(false); executeScreenCapture(); }} 
+                className="btn-analog btn-amber" 
+                style={{ flex: 1, padding: '12px', fontSize: '13px' }}
+              >
+                🔄 Re-Open Popup (Check "Share Audio" box)
+              </button>
 
               <button 
                 onClick={() => { setShowAudioMissingHelp(false); setSourceType('synth'); startSynthGenerator(); }} 
-                className={`btn-analog ${isFirefox ? 'btn-amber' : ''}`} 
-                style={{ flex: isFirefox ? 1 : 'none', padding: '12px', fontSize: '13px' }}
+                className="btn-analog" 
+                style={{ padding: '12px', fontSize: '13px' }}
               >
                 ⚡ Test Synth Groove
               </button>
@@ -1536,8 +1552,8 @@ export default function HostView({ onBack }) {
         </div>
       )}
 
-      {/* Mobile Screen Loopback Restriction Guidance Modal */}
-      {showMobileScreenModal && (
+      {/* Interactive System Audio Capture Guidance Modal */}
+      {showScreenCaptureGuideModal && (
         <div 
           style={{
             position: 'fixed',
@@ -1545,99 +1561,111 @@ export default function HostView({ onBack }) {
             left: 0,
             right: 0,
             bottom: 0,
-            background: 'rgba(0, 0, 0, 0.85)',
-            backdropFilter: 'blur(8px)',
+            background: 'rgba(0, 0, 0, 0.88)',
+            backdropFilter: 'blur(10px)',
             zIndex: 9999,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             padding: '16px'
           }}
-          onClick={() => setShowMobileScreenModal(false)}
+          onClick={() => setShowScreenCaptureGuideModal(false)}
         >
           <div 
             className="analog-deck" 
             style={{ 
-              maxWidth: '480px', 
+              maxWidth: '520px', 
               width: '100%', 
               padding: '24px', 
               display: 'flex', 
               flexDirection: 'column', 
               gap: '16px',
               border: '1px solid var(--amber-bright)',
-              boxShadow: '0 0 35px var(--amber-glow)'
+              boxShadow: '0 0 45px var(--amber-glow)',
+              position: 'relative'
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{
-                width: '36px',
-                height: '36px',
-                borderRadius: '8px',
+                width: '40px',
+                height: '40px',
+                borderRadius: '10px',
                 background: 'rgba(245, 158, 11, 0.15)',
                 border: '1px solid var(--amber-bright)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: 'var(--amber-bright)'
+                color: 'var(--amber-bright)',
+                boxShadow: '0 0 15px var(--amber-glow)'
               }}>
-                <Monitor size={20} />
+                <Volume2 size={22} />
               </div>
               <div>
-                <h3 className="font-serif" style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-cream)' }}>
-                  Laptop / Desktop Needed for Tab Audio
+                <h3 className="font-serif" style={{ fontSize: '19px', fontWeight: '800', color: 'var(--text-cream)' }}>
+                  System Audio Capture Setup
                 </h3>
                 <span className="font-mono" style={{ fontSize: '10px', color: 'var(--amber-bright)', letterSpacing: '1px' }}>
-                  MOBILE OS SANDBOX RESTRICTION
+                  STEP-BY-STEP POPUP INSTRUCTIONS
                 </span>
               </div>
             </div>
 
-            <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.6' }}>
-              <p style={{ marginBottom: '10px' }}>
-                Both <strong>Apple (iOS)</strong> and <strong>Google (Android)</strong> forbid mobile web browsers from recording audio from other native apps (like Spotify, YouTube, or Netflix).
-              </p>
-              <div style={{ background: '#0e141a', padding: '14px', borderRadius: '10px', border: '1px solid var(--border-deck)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-                  <span style={{ color: 'var(--amber-bright)', fontWeight: 'bold' }}>Option A:</span>
-                  <span style={{ color: 'var(--text-cream)' }}>
-                    <strong>Upload your MP3 / Music File:</strong> Tap <em>"Choose Audio File"</em> below to broadcast any song or audio file directly from your phone in perfect sync!
-                  </span>
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
+              To stream music from Spotify, YouTube, games, or movies to all connected phones, the browser will ask you what to capture:
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: '#0e141a', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-deck)' }}>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '6px', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>1</span>
+                <div style={{ fontSize: '12px', color: 'var(--text-cream)', lineHeight: '1.4' }}>
+                  <strong>Pick Your Sound Source in the Browser Popup:</strong>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                    • For <em>Spotify desktop app, games & system sound</em>: Select <strong>"Entire Screen"</strong>.<br />
+                    • For <em>YouTube, Web Spotify or Netflix tab</em>: Select <strong>"Chrome Tab"</strong>.
+                  </div>
                 </div>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-                  <span style={{ color: 'var(--amber-bright)', fontWeight: 'bold' }}>Option B:</span>
-                  <span style={{ color: 'var(--text-cream)' }}>
-                    <strong>Use your PC or Laptop as Host:</strong> Open PartySync in Chrome or Edge on your laptop to stream Spotify tabs or Netflix movies.
-                  </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', background: 'rgba(245, 158, 11, 0.08)', padding: '10px', borderRadius: '8px', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                <span style={{ background: '#ef4444', color: '#fff', borderRadius: '6px', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>2</span>
+                <div style={{ fontSize: '12px', color: 'var(--amber-bright)', lineHeight: '1.4' }}>
+                  <strong>⚠️ CRITICAL — TURN ON THE AUDIO CHECKBOX:</strong>
+                  <div style={{ fontSize: '11px', color: 'var(--text-cream)', marginTop: '2px' }}>
+                    Check the box: <strong>"Share system audio"</strong> or <strong>"Also share tab audio"</strong> at the bottom left!<br />
+                    <em>(On Android phones: select "Entire screen" and choose "Device audio").</em><br />
+                    If left unchecked, the browser captures silent video only.
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                <span style={{ background: 'var(--amber-core)', color: '#0c0b0a', borderRadius: '6px', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '800', fontSize: '11px', flexShrink: 0 }}>3</span>
+                <div style={{ fontSize: '12px', color: 'var(--text-cream)', lineHeight: '1.4' }}>
+                  <strong>Click "Share":</strong>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                    PartySync automatically strips the video feed and broadcasts pure 192kbps stereo Opus to all phones in sync!
+                  </div>
                 </div>
               </div>
             </div>
 
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <label 
+              <button 
+                onClick={executeScreenCapture}
                 className="btn-analog btn-amber" 
-                style={{ flex: 1, padding: '12px', fontSize: '13px', textAlign: 'center', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                style={{ flex: 1, padding: '14px', fontSize: '14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
               >
-                <Music size={15} />
-                <span>Choose Audio File</span>
-                <input 
-                  type="file" 
-                  accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
-                  onChange={(e) => { 
-                    setShowMobileScreenModal(false); 
-                    setSourceType('file'); 
-                    handleFileUpload(e); 
-                  }} 
-                  style={{ display: 'none' }} 
-                />
-              </label>
+                <Zap size={18} />
+                <span>Open Audio Capture Popup</span>
+              </button>
 
               <button 
-                onClick={() => setShowMobileScreenModal(false)} 
+                onClick={() => setShowScreenCaptureGuideModal(false)} 
                 className="btn-analog" 
-                style={{ padding: '12px 18px', fontSize: '13px' }}
+                style={{ padding: '14px 18px', fontSize: '13px' }}
               >
-                Got It
+                Cancel
               </button>
             </div>
           </div>
