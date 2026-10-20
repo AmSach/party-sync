@@ -39,7 +39,8 @@ export default function HostView({ onBack }) {
   const displayMediaStreamRef = useRef(null);
 
   // Host local playback pipeline delay & mute controls
-  const [laptopMuted, setLaptopMuted] = useState(true);
+  const [laptopMuted, setLaptopMuted] = useState(isMobile ? false : true);
+  const laptopMutedRef = useRef(isMobile ? false : true);
   const [hostDelayMs, setHostDelayMs] = useState(300); // 300ms default matches typical WebRTC transit latency
   const hostDelayMsRef = useRef(300);
   const [isFlashing, setIsFlashing] = useState(false);
@@ -69,6 +70,18 @@ export default function HostView({ onBack }) {
   const activeConnectionsRef = useRef(new Map());
   const activeMediaCallsRef = useRef(new Map()); // peerId -> MediaConnection
   const activeMediaTitleRef = useRef('No audio source selected');
+  const wakeLockRef = useRef(null);
+
+  const requestWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+        console.log('[Host] Screen Wake Lock active — preventing mobile sleep');
+      }
+    } catch (e) {
+      console.warn('[Host] Wake lock unavailable:', e);
+    }
+  };
 
   useEffect(() => {
     const randomCode = 'SESSION-' + Math.floor(1000 + Math.random() * 9000);
@@ -83,8 +96,41 @@ export default function HostView({ onBack }) {
 
     // Initialize Host Peer immediately on signaling network
     initHostPeer(randomCode);
+    requestWakeLock();
+
+    // Mobile gesture unlock listener: touching screen resumes AudioContext if suspended
+    const unlockHostAudio = () => {
+      if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+        try { navigator.audioSession.type = 'playback'; } catch (e) {}
+      }
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {});
+      }
+    };
+    window.addEventListener('click', unlockHostAudio);
+    window.addEventListener('touchstart', unlockHostAudio, { passive: true });
+    window.addEventListener('pointerdown', unlockHostAudio);
+
+    // Keep mobile host alive when app is minimized or screen unlocks
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible') {
+        unlockHostAudio();
+        if (wakeLockRef.current === null) {
+          requestWakeLock();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      window.removeEventListener('click', unlockHostAudio);
+      window.removeEventListener('touchstart', unlockHostAudio);
+      window.removeEventListener('pointerdown', unlockHostAudio);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (wakeLockRef.current) {
+        try { wakeLockRef.current.release(); } catch (e) {}
+        wakeLockRef.current = null;
+      }
       stopBroadcasting(true);
     };
   }, []);
@@ -269,6 +315,9 @@ export default function HostView({ onBack }) {
   const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('firefox');
 
   const ensureHostAudioNodes = (ctx) => {
+    if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+      try { navigator.audioSession.type = 'playback'; } catch (e) {}
+    }
     // Always rebuild a fresh MediaStreamDestination so we never broadcast dead/stale tracks.
     // stopBroadcasting() nulls streamDestRef, delay, and gain — so this always starts clean.
     if (!streamDestRef.current) {
@@ -290,7 +339,7 @@ export default function HostView({ onBack }) {
     }
     if (!hostGainNodeRef.current) {
       const hostGain = ctx.createGain();
-      hostGain.gain.setValueAtTime(laptopMuted ? 0 : 1.0, ctx.currentTime);
+      hostGain.gain.setValueAtTime(laptopMutedRef.current ? 0 : 1.0, ctx.currentTime);
       hostGainNodeRef.current = hostGain;
       hostDelayNodeRef.current.connect(hostGain);
       hostGain.connect(ctx.destination);
@@ -307,6 +356,13 @@ export default function HostView({ onBack }) {
     if (ctx.state === 'suspended') ctx.resume();
 
     ensureHostAudioNodes(ctx);
+
+    // Explicitly unmute host speaker for local file playback
+    laptopMutedRef.current = false;
+    setLaptopMuted(false);
+    if (hostGainNodeRef.current) {
+      hostGainNodeRef.current.gain.setValueAtTime(1.0, ctx.currentTime);
+    }
 
     if (bufferSourceNodeRef.current) {
       try {
@@ -611,7 +667,11 @@ export default function HostView({ onBack }) {
     const title = "Warm Analog Lofi Chords (Test Loop)";
     setActiveMediaTitle(title);
     activeMediaTitleRef.current = title;
+    laptopMutedRef.current = false;
     setLaptopMuted(false);
+    if (hostGainNodeRef.current && audioContextRef.current) {
+      hostGainNodeRef.current.gain.setValueAtTime(1.0, audioContextRef.current.currentTime);
+    }
     audioStreamRef.current = dest.stream;
     setIsBroadcasting(true);
 
@@ -662,6 +722,7 @@ export default function HostView({ onBack }) {
       source.connect(hostDelayNodeRef.current);
       source.connect(streamDestRef.current);
 
+      laptopMutedRef.current = isMic;
       setLaptopMuted(isMic);
       if (hostGainNodeRef.current) {
         hostGainNodeRef.current.gain.setValueAtTime(isMic ? 0 : 1.0, ctx.currentTime);
@@ -701,6 +762,7 @@ export default function HostView({ onBack }) {
   const handleToggleLaptopMute = () => {
     const nextMuted = !laptopMuted;
     setLaptopMuted(nextMuted);
+    laptopMutedRef.current = nextMuted;
     if (hostGainNodeRef.current && audioContextRef.current) {
       hostGainNodeRef.current.gain.setValueAtTime(nextMuted ? 0 : 1.0, audioContextRef.current.currentTime);
     }
@@ -868,6 +930,10 @@ export default function HostView({ onBack }) {
     });
 
     if (fullTeardown) {
+      if (wakeLockRef.current) {
+        try { wakeLockRef.current.release(); } catch (e) {}
+        wakeLockRef.current = null;
+      }
       if (peerRef.current) {
         peerRef.current.destroy();
         peerRef.current = null;
@@ -1667,6 +1733,11 @@ export default function HostView({ onBack }) {
                     <em>(On Android phones: select "Entire screen" and choose "Device audio").</em><br />
                     If left unchecked, the browser captures silent video only.
                   </div>
+                  {isMobile && /iPhone|iPad|iPod/i.test(navigator.userAgent) && (
+                    <div style={{ fontSize: '11px', color: '#f87171', marginTop: '6px', padding: '6px 8px', background: 'rgba(239, 68, 68, 0.15)', borderRadius: '6px', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                      ⚠️ <strong>iOS Notice:</strong> Apple iOS blocks system audio capture in Safari. To host from an iPhone or iPad, use <strong>"Local Audio / Music File"</strong> or <strong>"Analog Lofi Groove"</strong>.
+                    </div>
+                  )}
                 </div>
               </div>
 
