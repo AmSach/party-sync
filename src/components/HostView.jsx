@@ -238,6 +238,12 @@ export default function HostView({ onBack }) {
       return;
     }
 
+    const existingCall = activeMediaCallsRef.current.get(peerId);
+    if (existingCall && existingCall.open && existingCall._localStream === stream) {
+      console.log(`[Host] Media call to ${peerId} already active on this stream, skipping redundant call`);
+      return;
+    }
+
     // Remove any old entry from tracking map (do NOT call .close() — it sends a
     // CLOSE signal to the receiver which can kill newly arriving calls too)
     activeMediaCallsRef.current.delete(peerId);
@@ -263,6 +269,8 @@ export default function HostView({ onBack }) {
   const isFirefox = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('firefox');
 
   const ensureHostAudioNodes = (ctx) => {
+    // Always rebuild a fresh MediaStreamDestination so we never broadcast dead/stale tracks.
+    // stopBroadcasting() nulls streamDestRef, delay, and gain — so this always starts clean.
     if (!streamDestRef.current) {
       const dest = ctx.createMediaStreamDestination();
       dest.stream.getAudioTracks().forEach(track => {
@@ -616,7 +624,6 @@ export default function HostView({ onBack }) {
   };
 
   const setupHostAudio = (stream, isMic = false) => {
-    audioStreamRef.current = stream;
     setIsBroadcasting(true);
 
     stream.getAudioTracks().forEach(track => {
@@ -633,20 +640,13 @@ export default function HostView({ onBack }) {
       } catch (e) {}
     });
 
-    console.log(`[Host] Broadcasting Studio Hi-Fi Opus audio stream to ${activeConnectionsRef.current.size} satellites`);
-    activeConnectionsRef.current.forEach((conn, peerId) => {
-      callPeerWithStream(peerId, stream);
-      if (conn.open) {
-        conn.send({ type: 'AUDIO_STARTED', title: activeMediaTitleRef.current });
-      }
-    });
-
     try {
       const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
       const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
       audioContextRef.current = ctx;
       if (ctx.state === 'suspended') ctx.resume();
 
+      // Build shared nodes (fresh every broadcast session since stopBroadcasting nulls them)
       ensureHostAudioNodes(ctx);
 
       if (hostSourceNodeRef.current) {
@@ -656,17 +656,31 @@ export default function HostView({ onBack }) {
       const source = ctx.createMediaStreamSource(stream);
       hostSourceNodeRef.current = source;
 
-      // Connect to visualizer and delayed host speaker pipeline
+      // Route to visualizer, delayed host speaker pipeline, AND the shared WebRTC
+      // stream destination — same unified path used by file/synth sources.
       source.connect(analyserRef.current);
       source.connect(hostDelayNodeRef.current);
+      source.connect(streamDestRef.current);
 
       setLaptopMuted(isMic);
       if (hostGainNodeRef.current) {
         hostGainNodeRef.current.gain.setValueAtTime(isMic ? 0 : 1.0, ctx.currentTime);
       }
     } catch (e) {
-      console.warn("[Host] Audio pipeline notice:", e);
+      console.warn('[Host] Audio pipeline notice:', e);
     }
+
+    // Broadcast the unified WebRTC stream destination output (not the raw mic/screen stream)
+    const broadcastStream = streamDestRef.current ? streamDestRef.current.stream : stream;
+    audioStreamRef.current = broadcastStream;
+
+    console.log(`[Host] Broadcasting Studio Hi-Fi Opus audio stream to ${activeConnectionsRef.current.size} satellites`);
+    activeConnectionsRef.current.forEach((conn, peerId) => {
+      callPeerWithStream(peerId, broadcastStream);
+      if (conn.open) {
+        conn.send({ type: 'AUDIO_STARTED', title: activeMediaTitleRef.current });
+      }
+    });
   };
 
   const toggleMetronome = () => {
@@ -805,8 +819,15 @@ export default function HostView({ onBack }) {
       audioElementRef.current.pause();
       audioElementRef.current.src = '';
     }
+
+    // Only stop tracks on real media streams (mic/screen). NEVER stop WebAudio-synthesized
+    // MediaStreamDestination tracks — those are virtual and cannot be restarted once stopped.
     if (audioStreamRef.current) {
-      audioStreamRef.current.getTracks().forEach(t => t.stop());
+      const isWebAudioDest = streamDestRef.current &&
+        audioStreamRef.current === streamDestRef.current.stream;
+      if (!isWebAudioDest) {
+        audioStreamRef.current.getTracks().forEach(t => t.stop());
+      }
       audioStreamRef.current = null;
     }
     if (displayMediaStreamRef.current) {
@@ -825,6 +846,16 @@ export default function HostView({ onBack }) {
     if (hostGainNodeRef.current) {
       try { hostGainNodeRef.current.disconnect(); } catch (e) {}
       hostGainNodeRef.current = null;
+    }
+    // Null the WebRTC stream destination and analyser so ensureHostAudioNodes
+    // always creates a fresh, live destination on the next broadcast session.
+    if (streamDestRef.current) {
+      try { streamDestRef.current.disconnect?.(); } catch (e) {}
+      streamDestRef.current = null;
+    }
+    if (analyserRef.current) {
+      try { analyserRef.current.disconnect(); } catch (e) {}
+      analyserRef.current = null;
     }
 
     activeMediaCallsRef.current.forEach(call => {

@@ -100,6 +100,8 @@ class SyncedAudioProcessor {
     // Pull RTP packets from the network into the browser's decoding engine.
     if (this.streamActivator) {
       try {
+        this.streamActivator.removeAttribute('src');
+        this.streamActivator.src = '';
         this.streamActivator.srcObject = mediaStream;
         const playPromise = this.streamActivator.play();
         if (playPromise !== undefined) {
@@ -204,13 +206,37 @@ class SyncedAudioProcessor {
       this.delayNode?.disconnect();
       this.gainNode?.disconnect();
       this.analyserNode?.disconnect();
-      if (this.streamActivator) {
-        this.streamActivator.pause();
-        this.streamActivator.srcObject = null;
-      }
+      // NOTE: Do NOT pause or null streamActivator.srcObject here —
+      // setupStream() calls disconnect() then immediately reassigns srcObject.
+      // Nulling it mid-stream causes an audio gap. streamActivator lifecycle
+      // is managed solely by setupStream() and the full component unmount.
     } catch (e) {
       // ignore
     }
+    this.sourceNode = null;
+    this.delayNode = null;
+    this.gainNode = null;
+    this.analyserNode = null;
+  }
+
+  // Full teardown for component unmount — also cleans up the DOM activator element.
+  fullDisconnect() {
+    this.disconnect();
+    try {
+      if (this.streamActivator) {
+        this.streamActivator.pause();
+        this.streamActivator.srcObject = null;
+        this.streamActivator.src = '';
+        if (this.streamActivator.parentNode) {
+          this.streamActivator.parentNode.removeChild(this.streamActivator);
+        }
+        this.streamActivator = null;
+      }
+      if (this.ctx) {
+        this.ctx.close().catch(() => {});
+        this.ctx = null;
+      }
+    } catch (e) {}
   }
 }
 

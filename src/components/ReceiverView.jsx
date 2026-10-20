@@ -61,6 +61,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
   }, [initialRoomId]);
 
+  // Register interaction listeners ONCE on mount — never re-run on audio state changes.
+  // CRITICAL: Keeping [] deps here prevents cleanup (which calls disconnect()) from firing
+  // every time isAudioActive flips, which was killing the live audio pipeline immediately
+  // after the stream arrived.
   useEffect(() => {
     clockSync.onSyncChange = (info) => {
       setClockInfo(info);
@@ -73,7 +77,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       }
     };
     window.addEventListener('click', unlockAudio);
-    window.addEventListener('touchstart', unlockAudio);
+    window.addEventListener('touchstart', unlockAudio, { passive: true });
     window.addEventListener('pointerdown', unlockAudio);
 
     const handleVisibilityChange = async () => {
@@ -84,8 +88,20 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         }
       }
     };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Periodic check to detect if mobile OS suspended audio context
+    return () => {
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+      window.removeEventListener('pointerdown', unlockAudio);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      disconnect();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Separate effect: poll AudioContext state to show/hide the tap-to-unmute banner.
+  // Isolated so toggling isAudioActive never re-registers listeners or triggers disconnect.
+  useEffect(() => {
     const checkCtxInterval = setInterval(() => {
       if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended' && isAudioActive) {
         setNeedsUserGesture(true);
@@ -93,17 +109,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
         setNeedsUserGesture(false);
       }
     }, 2000);
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      clearInterval(checkCtxInterval);
-      window.removeEventListener('click', unlockAudio);
-      window.removeEventListener('touchstart', unlockAudio);
-      window.removeEventListener('pointerdown', unlockAudio);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      disconnect();
-    };
+    return () => clearInterval(checkCtxInterval);
   }, [isAudioActive]);
 
   const triggerVisualFlash = () => {
@@ -233,6 +239,10 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
 
     peer.on('call', (call) => {
       console.log('[Receiver] Answering incoming audio stream from Host...');
+      if (activeCallRef.current && activeCallRef.current !== call) {
+        try { activeCallRef.current.close(); } catch (e) {}
+      }
+      activeCallRef.current = call;
       call.answer(undefined, { sdpTransform: configureHighFidelityAudioSDP });
 
       // Constrain WebRTC NetEQ jitter buffer to prevent buffer ballooning and playout drift
@@ -267,12 +277,19 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
       });
 
       call.on('close', () => {
-        setIsAudioActive(false);
-        setStatusText('Audio Feed Stopped');
+        if (activeCallRef.current === call) {
+          activeCallRef.current = null;
+          setIsAudioActive(false);
+          setStatusText('Audio Feed Stopped');
+        }
       });
 
       call.on('error', (err) => {
         console.warn('[Receiver] Media call error:', err);
+        if (activeCallRef.current === call) {
+          activeCallRef.current = null;
+          setIsAudioActive(false);
+        }
       });
     });
 
@@ -360,6 +377,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
   };
 
   const requestSyncPulse = () => {
+    audioProcessor.unlock();
     if (connRef.current && connRef.current.open) {
       connRef.current.send({ type: 'EMIT_PULSE_REQUEST' });
     }
@@ -399,7 +417,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
     }
     if (connRef.current) connRef.current.close();
     if (peerRef.current) peerRef.current.destroy();
-    audioProcessor.disconnect();
+    audioProcessor.fullDisconnect();
     if (wakeLockRef.current) wakeLockRef.current.release();
     setIsConnected(false);
     setIsAudioActive(false);
