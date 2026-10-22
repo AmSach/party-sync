@@ -1,9 +1,12 @@
 import React, { useEffect, useRef } from 'react';
 
-export default function Visualizer({ analyser, active = true, height = 70 }) {
+export default function Visualizer({ analyser, active = true, height = 70, powerSave = false }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
+    // Ultra Power Saving Mode: completely halt canvas render loop & FFT calculation
+    if (powerSave) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -64,7 +67,7 @@ export default function Visualizer({ analyser, active = true, height = 70 }) {
     return () => {
       cancelAnimationFrame(animationId);
     };
-  }, [analyser, active]);
+  }, [analyser, active, powerSave]);
 
   return (
     <div style={{ 

@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { Radio, Speaker, Tv, Download, Disc3, Sparkles } from 'lucide-react';
+import { Radio, Speaker, Tv, Download, Disc3, Sparkles, Zap, Moon } from 'lucide-react';
 import HeroCard from './components/HeroCard';
 import HostView from './components/HostView';
 import ReceiverView from './components/ReceiverView';
 import MotionBackground from './components/MotionBackground';
+import UltraPowerSaver from './components/UltraPowerSaver';
 
 export default function App() {
   const [mode, setMode] = useState('host'); // Default directly into a working console, no split tab landing screen!
   const [roomFromUrl, setRoomFromUrl] = useState('');
   const [installPrompt, setInstallPrompt] = useState(null);
+  const [isPowerSave, setIsPowerSave] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -40,10 +42,18 @@ export default function App() {
       display: 'flex', 
       flexDirection: 'column', 
       position: 'relative',
-      background: '#0f1419'
+      background: isPowerSave ? '#000000' : '#0f1419'
     }}>
-      {/* Motion.dev Hardware-Accelerated Acoustic Background */}
-      <MotionBackground />
+      {/* Motion.dev Hardware-Accelerated Acoustic Background (paused in Power Save) */}
+      <MotionBackground powerSave={isPowerSave} />
+
+      {/* Ultra Power Saving Mode Overlay (OLED Pitch Blackout) */}
+      {isPowerSave && (
+        <UltraPowerSaver 
+          mode={mode} 
+          onWake={() => setIsPowerSave(false)} 
+        />
+      )}
       
       {/* Main Console Container */}
       <div style={{ position: 'relative', zIndex: 10, display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
@@ -134,6 +144,27 @@ export default function App() {
 
           {/* Right Tools & Mobile Mode Toggle */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {/* 1-Tap Ultra Power Saving Mode Toggle (OLED Blackout) */}
+            <button
+              onClick={() => setIsPowerSave(prev => !prev)}
+              className="btn-analog"
+              title="Ultra Power Saving Mode (OLED Blackout)"
+              style={{
+                padding: '6px 10px',
+                fontSize: '11px',
+                fontFamily: 'monospace',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                background: isPowerSave ? '#052e16' : '#111827',
+                color: isPowerSave ? '#4ade80' : 'var(--text-muted)',
+                borderColor: isPowerSave ? '#22c55e' : 'var(--border-deck)'
+              }}
+            >
+              <Zap size={13} color={isPowerSave ? '#4ade80' : 'currentColor'} />
+              <span>ECO OLED</span>
+            </button>
+
             <button
               onClick={() => setMode(mode === 'host' ? 'receiver' : 'host')}
               className="btn-analog show-on-mobile"
@@ -164,9 +195,18 @@ export default function App() {
 
           {/* Active Broadcast or Receiver Station */}
           {mode === 'host' ? (
-            <HostView onBack={() => setMode('receiver')} />
+            <HostView 
+              isPowerSave={isPowerSave}
+              onTogglePowerSave={() => setIsPowerSave(prev => !prev)}
+              onBack={() => setMode('receiver')} 
+            />
           ) : (
-            <ReceiverView initialRoomId={roomFromUrl} onBack={() => setMode('host')} />
+            <ReceiverView 
+              initialRoomId={roomFromUrl} 
+              isPowerSave={isPowerSave}
+              onTogglePowerSave={() => setIsPowerSave(prev => !prev)}
+              onBack={() => setMode('host')} 
+            />
           )}
         </main>
 

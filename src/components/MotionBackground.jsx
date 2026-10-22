@@ -1,7 +1,25 @@
 import React, { useEffect } from 'react';
 import { motion, useMotionValue, useSpring } from 'motion/react';
 
-export default function MotionBackground() {
+export default function MotionBackground({ powerSave = false }) {
+  // Ultra Power Saving Mode: completely unmount GPU animation layers
+  if (powerSave) {
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          background: '#000000',
+          zIndex: 0
+        }}
+        aria-hidden="true"
+      />
+    );
+  }
+
   // Smooth mouse parallax physics via motion.dev springs
   const mouseX = useMotionValue(0);
   const mouseY = useMotionValue(0);

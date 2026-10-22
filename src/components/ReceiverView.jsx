@@ -10,7 +10,7 @@ import { clockSync } from '../utils/clockSync';
 import { configureHighFidelityAudioSDP } from '../utils/sdp';
 import Visualizer from './Visualizer';
 
-export default function ReceiverView({ initialRoomId = '', onBack }) {
+export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave = false, onTogglePowerSave }) {
   const [roomId, setRoomId] = useState(initialRoomId);
   const [deviceName, setDeviceName] = useState('Satellite Speaker');
   const [isConnected, setIsConnected] = useState(false);
@@ -467,9 +467,32 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
             </h1>
           </div>
 
-          <button onClick={onBack} className="btn-analog" style={{ fontSize: '12px', padding: '6px 14px' }}>
-            Switch Mode
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {onTogglePowerSave && (
+              <button 
+                onClick={onTogglePowerSave} 
+                className="btn-analog" 
+                title="Ultra Power Saving Mode (OLED Blackout)"
+                style={{
+                  fontSize: '12px',
+                  padding: '6px 12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: isPowerSave ? '#052e16' : undefined,
+                  color: isPowerSave ? '#4ade80' : undefined,
+                  borderColor: isPowerSave ? '#22c55e' : undefined
+                }}
+              >
+                <Zap size={14} color={isPowerSave ? '#4ade80' : 'currentColor'} />
+                <span>OLED Eco</span>
+              </button>
+            )}
+
+            <button onClick={onBack} className="btn-analog" style={{ fontSize: '12px', padding: '6px 14px' }}>
+              Switch Mode
+            </button>
+          </div>
         </div>
 
         {!isConnected ? (
@@ -885,6 +908,7 @@ export default function ReceiverView({ initialRoomId = '', onBack }) {
                 analyser={audioProcessor.analyserNode} 
                 active={isAudioActive} 
                 height={isFullscreenVisualizer ? 200 : 64} 
+                powerSave={isPowerSave}
               />
             </div>
 

@@ -10,7 +10,7 @@ import { clockSync, ClockSynchronizer } from '../utils/clockSync';
 import { configureHighFidelityAudioSDP } from '../utils/sdp';
 import Visualizer from './Visualizer';
 
-export default function HostView({ onBack }) {
+export default function HostView({ onBack, isPowerSave = false, onTogglePowerSave }) {
   const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   const [roomId, setRoomId] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
@@ -1007,6 +1007,22 @@ export default function HostView({ onBack }) {
               <span>QR Code</span>
             </button>
 
+            {onTogglePowerSave && (
+              <button 
+                onClick={onTogglePowerSave} 
+                className="btn-analog" 
+                title="Ultra Power Saving Mode (OLED Blackout)"
+                style={{
+                  background: isPowerSave ? '#052e16' : undefined,
+                  color: isPowerSave ? '#4ade80' : undefined,
+                  borderColor: isPowerSave ? '#22c55e' : undefined
+                }}
+              >
+                <Zap size={16} color={isPowerSave ? '#4ade80' : 'currentColor'} />
+                <span>OLED Eco</span>
+              </button>
+            )}
+
             <button onClick={copyShareLink} className="btn-analog">
               {copied ? <Check size={16} color="var(--amber-bright)" /> : <Copy size={16} />}
               <span>{copied ? 'Copied' : 'Share'}</span>
@@ -1436,7 +1452,7 @@ export default function HostView({ onBack }) {
             </span>
           </div>
 
-          <Visualizer analyser={analyserRef.current} active={isBroadcasting} height={54} />
+          <Visualizer analyser={analyserRef.current} active={isBroadcasting} height={54} powerSave={isPowerSave} />
         </div>
 
         {/* Video preview for local movies */}
