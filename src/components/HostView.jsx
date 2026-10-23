@@ -4,11 +4,12 @@ import QRCode from 'qrcode';
 import { 
   Tv, Music, Monitor, Mic, Radio, Users, Sliders, Copy, 
   Check, Volume2, VolumeX, ShieldCheck, Play, Pause, RefreshCw, QrCode,
-  Zap, Clock, Wifi, Info, BellRing, Target, RotateCcw, Repeat, FileAudio, AlertCircle
+  Zap, Clock, Wifi, Info, BellRing, Target, RotateCcw, Repeat, FileAudio, AlertCircle, Film
 } from 'lucide-react';
 import { clockSync, ClockSynchronizer } from '../utils/clockSync';
 import { configureHighFidelityAudioSDP } from '../utils/sdp';
 import Visualizer from './Visualizer';
+import LipSyncVideoMonitor from './LipSyncVideoMonitor';
 
 export default function HostView({ onBack, isPowerSave = false, onTogglePowerSave }) {
   const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -46,6 +47,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const [isFlashing, setIsFlashing] = useState(false);
   const [hostOutputProfile, setHostOutputProfile] = useState('internal'); // 'internal' | 'bluetooth' | 'aux'
   const hostOutputProfileRef = useRef('internal');
+  const [syncMode, setSyncMode] = useState('balanced'); // 'lipsync' (65ms target) | 'balanced' (160ms target) | 'party' (280ms target)
+  const syncModeRef = useRef('balanced');
   const satelliteLagsRef = useRef(new Map()); // peerId -> { name, physicalLagMs, profile }
   const [fleetTargetMs, setFleetTargetMs] = useState(300);
 
@@ -195,6 +198,11 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
           handleCalibrateRequest(conn);
         } else if (data.type === 'EMIT_PULSE_REQUEST') {
           emitSyncPulse();
+        } else if (data.type === 'REQUEST_AUDIO_STREAM') {
+          console.log(`[Host] Satellite ${conn.peer} requested audio stream re-transmission`);
+          if (audioStreamRef.current && peerRef.current) {
+            callPeerWithStream(conn.peer, audioStreamRef.current);
+          }
         } else if (data.type === 'SATELLITE_LAG_UPDATE') {
           // Satellite reports its true physical latency (transit + NetEQ + DAC + hardware profile + fine-tune)
           const lag = Math.max(0, Math.round(data.satellitePhysicalLag || 0));
@@ -530,10 +538,9 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       if ('contentHint' in t) t.contentHint = 'music';
     });
 
-    // CRITICAL FIX: Keep video track enabled=false instead of stopping it,
-    // so Chrome does NOT kill the entire capture session!
+    // Keep video track enabled=true so LipSyncVideoMonitor can render delayed video for lip-sync!
     mediaStream.getVideoTracks().forEach(track => {
-      track.enabled = false;
+      track.enabled = true;
       track.onended = () => {
         console.log('[Host] Native screen capture ended by user');
         stopBroadcasting(false);
@@ -560,6 +567,17 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     setActiveMediaTitle(file.name);
     activeMediaTitleRef.current = file.name;
     setIsFileDecoding(true);
+
+    // If file contains video, mount to preview element
+    if (file.type.startsWith('video/') && videoElementRef.current) {
+      try {
+        videoElementRef.current.src = URL.createObjectURL(file);
+        videoElementRef.current.style.display = 'block';
+      } catch (e) {}
+    } else if (videoElementRef.current) {
+      videoElementRef.current.src = '';
+      videoElementRef.current.style.display = 'none';
+    }
 
     try {
       const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
@@ -774,8 +792,12 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     const hostBtLag = hostOutputProfileRef.current === 'bluetooth' ? 200 : 0;
     const hostPhysicalLag = 20 + hostBtLag; // 20ms DAC + BT lag
     
-    // Find the maximum physical latency across all satellites and host
-    let maxLag = Math.max(hostPhysicalLag, 280); // 280ms baseline so phones have buffer
+    // Baseline buffer depending on mode:
+    // - 'lipsync': 65ms baseline (ultra-low latency for YouTube, Movies, gaming)
+    // - 'balanced': 160ms baseline (optimal sync with standard Wi-Fi jitter headroom)
+    // - 'party': 280ms baseline (maximum packet jitter tolerance for multi-room phone fleets)
+    const baseline = syncModeRef.current === 'lipsync' ? 65 : syncModeRef.current === 'balanced' ? 160 : 280;
+    let maxLag = Math.max(hostPhysicalLag, baseline);
     satelliteLagsRef.current.forEach((info) => {
       if (info.physicalLagMs > maxLag) {
         maxLag = info.physicalLagMs;
@@ -786,7 +808,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     setFleetTargetMs(targetMs);
 
     const newHostDelay = Math.max(0, targetMs - hostPhysicalLag);
-    console.log(`[Host] Fleet Sync: Target=${targetMs}ms | Host Lag=${hostPhysicalLag}ms (${hostOutputProfileRef.current}) → Host Delay=${newHostDelay}ms across ${satelliteLagsRef.current.size} satellites`);
+    console.log(`[Host] Fleet Sync: Mode=${syncModeRef.current} | Target=${targetMs}ms | Host Lag=${hostPhysicalLag}ms (${hostOutputProfileRef.current}) → Host Delay=${newHostDelay}ms across ${satelliteLagsRef.current.size} satellites`);
 
     setHostDelayMs(newHostDelay);
     hostDelayMsRef.current = newHostDelay;
@@ -811,10 +833,17 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
           type: 'FLEET_SYNC_TARGET',
           fleetTargetMs: targetMs,
           hostDelayMs: newHostDelay,
-          hostOutputProfile: hostOutputProfileRef.current
+          hostOutputProfile: hostOutputProfileRef.current,
+          syncMode: syncModeRef.current
         });
       }
     });
+  };
+
+  const handleSyncModeSelect = (mode) => {
+    setSyncMode(mode);
+    syncModeRef.current = mode;
+    recalculateFleetSync();
   };
 
   const handleHostProfileSelect = (profile) => {
@@ -1119,18 +1148,18 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
               <Music size={18} />
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontSize: '13px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  Local Audio / Music File
+                  Local Audio / Video File
                   {isMobile && (
                     <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 5px', color: '#10b981' }}>
                       RECOMMENDED
                     </span>
                   )}
                 </div>
-                <div style={{ fontSize: '11px', opacity: 0.7 }}>MP3, WAV, M4A, FLAC, AAC</div>
+                <div style={{ fontSize: '11px', opacity: 0.7 }}>MP3, WAV, FLAC, MP4, WebM</div>
               </div>
               <input 
                 type="file" 
-                accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
+                accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.mp4,.webm,.mkv,.mov" 
                 onChange={(e) => { setSourceType('file'); handleFileUpload(e); }} 
                 style={{ display: 'none' }} 
               />
@@ -1175,7 +1204,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <FileAudio size={16} color="var(--amber-bright)" />
                   <strong style={{ fontSize: '13px', color: 'var(--text-cream)' }}>
-                    {activeMediaTitleRef.current !== 'No audio source selected' ? activeMediaTitleRef.current : 'No audio file selected yet'}
+                    {activeMediaTitleRef.current !== 'No audio source selected' ? activeMediaTitleRef.current : 'No media file selected yet'}
                   </strong>
                 </div>
 
@@ -1183,7 +1212,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
                   <span>📂 Choose Another File</span>
                   <input 
                     type="file" 
-                    accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
+                    accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.mp4,.webm,.mkv,.mov" 
                     onChange={(e) => { handleFileUpload(e); }} 
                     style={{ display: 'none' }} 
                   />
@@ -1356,6 +1385,68 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
             </div>
           </div>
 
+          {/* Fleet Sync Mode Profile Selector (Lip-Sync vs Balanced vs Party) */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Film size={14} color="var(--amber-bright)" />
+                <span className="font-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  SYNC PROFILE & LIP-SYNC OPTIMIZATION:
+                </span>
+              </div>
+              <span className="paper-badge" style={{ fontSize: '10px', padding: '2px 6px', color: syncMode === 'lipsync' ? '#10b981' : syncMode === 'party' ? '#38bdf8' : 'var(--amber-bright)' }}>
+                {syncMode === 'lipsync' ? '🎬 LIP-SYNC (65MS TARGET)' : syncMode === 'party' ? '🎉 WHOLE-HOUSE PARTY (280MS BUFFER)' : '⚡ BALANCED (160MS TARGET)'}
+              </span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+              <button
+                onClick={() => handleSyncModeSelect('lipsync')}
+                className={`btn-analog ${syncMode === 'lipsync' ? 'btn-amber' : ''}`}
+                style={{ padding: '10px 8px', fontSize: '11px', flexDirection: 'column', alignItems: 'flex-start', gap: '3px' }}
+                title="Ultra-low 65ms latency target for YouTube, Netflix, videos & lip-sync"
+              >
+                <div style={{ fontWeight: '700', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span>🎬 Lip-Sync</span>
+                  <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 4px', color: '#10b981' }}>65ms</span>
+                </div>
+                <div style={{ fontSize: '10px', opacity: 0.75, textAlign: 'left' }}>
+                  Movies, YouTube & video
+                </div>
+              </button>
+
+              <button
+                onClick={() => handleSyncModeSelect('balanced')}
+                className={`btn-analog ${syncMode === 'balanced' ? 'btn-amber' : ''}`}
+                style={{ padding: '10px 8px', fontSize: '11px', flexDirection: 'column', alignItems: 'flex-start', gap: '3px' }}
+                title="Balanced 160ms latency target for low-jitter Wi-Fi"
+              >
+                <div style={{ fontWeight: '700', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span>⚡ Balanced</span>
+                  <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 4px', color: 'var(--amber-bright)' }}>160ms</span>
+                </div>
+                <div style={{ fontSize: '10px', opacity: 0.75, textAlign: 'left' }}>
+                  Standard home Wi-Fi
+                </div>
+              </button>
+
+              <button
+                onClick={() => handleSyncModeSelect('party')}
+                className={`btn-analog ${syncMode === 'party' ? 'btn-amber' : ''}`}
+                style={{ padding: '10px 8px', fontSize: '11px', flexDirection: 'column', alignItems: 'flex-start', gap: '3px' }}
+                title="Maximum 280ms jitter buffer for multi-room phone fleets"
+              >
+                <div style={{ fontWeight: '700', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span>🎉 Party Mode</span>
+                  <span className="paper-badge" style={{ fontSize: '9px', padding: '1px 4px', color: '#38bdf8' }}>280ms</span>
+                </div>
+                <div style={{ fontSize: '10px', opacity: 0.75, textAlign: 'left' }}>
+                  Multi-room & noisy Wi-Fi
+                </div>
+              </button>
+            </div>
+          </div>
+
           {/* Continuous Slider & Stepped Adjustments for Host Delay */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1454,6 +1545,15 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
           <Visualizer analyser={analyserRef.current} active={isBroadcasting} height={54} powerSave={isPowerSave} />
         </div>
+
+        {/* Frame-Accurate Video Delay Lip-Sync Monitor for System Screen / Tab Video */}
+        {sourceType === 'screen' && displayMediaStreamRef.current && isBroadcasting && (
+          <LipSyncVideoMonitor 
+            stream={displayMediaStreamRef.current} 
+            audioDelayMs={hostDelayMs} 
+            title={activeMediaTitle} 
+          />
+        )}
 
         {/* Video preview for local movies */}
         <video ref={videoElementRef} controls style={{ width: '100%', maxHeight: '180px', borderRadius: '10px', display: sourceType === 'file' ? 'block' : 'none' }} />

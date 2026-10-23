@@ -37,6 +37,15 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   const fleetTargetLagRef = useRef(300);
   const syncKeeperIntervalRef = useRef(null);
 
+  // Dynamic NetEQ jitter buffer measurement & Auto-recovery state
+  const measuredNetEqRef = useRef(35);
+  const hostIsBroadcastingRef = useRef(false);
+  const isReconnectingRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef(null);
+  const userDisconnectedRef = useRef(false);
+  const targetRoomIdRef = useRef('');
+
   const requestWakeLock = async () => {
     try {
       if ('wakeLock' in navigator) {
@@ -117,10 +126,65 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
     setTimeout(() => setIsFlashing(false), 80);
   };
 
-  const connectToHost = () => {
+  const updateJitterBufferStats = async () => {
+    if (!activeCallRef.current || !activeCallRef.current.peerConnection) return;
+    try {
+      const pc = activeCallRef.current.peerConnection;
+      pc.getReceivers().forEach(receiver => {
+        if (receiver.track && receiver.track.kind === 'audio') {
+          if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.04;
+          if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 40;
+        }
+      });
+
+      const stats = await pc.getStats();
+      stats.forEach(report => {
+        if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+          if (typeof report.jitterBufferDelay === 'number' && typeof report.jitterBufferEmittedCount === 'number' && report.jitterBufferEmittedCount > 0) {
+            const avgDelayMs = Math.round((report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000);
+            if (avgDelayMs >= 15 && avgDelayMs <= 400) {
+              measuredNetEqRef.current = Math.round(measuredNetEqRef.current * 0.7 + avgDelayMs * 0.3);
+            }
+          }
+        }
+      });
+    } catch (e) {}
+  };
+
+  const attemptReconnect = () => {
+    if (userDisconnectedRef.current) return;
+    if (isReconnectingRef.current) return;
+    isReconnectingRef.current = true;
+
+    reconnectAttemptsRef.current += 1;
+    const backoffMs = Math.min(8000, 1500 * Math.pow(1.4, reconnectAttemptsRef.current - 1));
+    console.log(`[Receiver] Auto-reconnect attempt #${reconnectAttemptsRef.current} scheduled in ${Math.round(backoffMs)}ms`);
+    setStatusText(`Reconnecting (Attempt #${reconnectAttemptsRef.current} in ${(backoffMs / 1000).toFixed(1)}s)...`);
+
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(() => {
+      if (userDisconnectedRef.current) return;
+      if (activeCallRef.current) {
+        try { activeCallRef.current.close(); } catch (e) {}
+        activeCallRef.current = null;
+      }
+      if (connRef.current) {
+        try { connRef.current.close(); } catch (e) {}
+        connRef.current = null;
+      }
+      if (peerRef.current) {
+        try { peerRef.current.destroy(); } catch (e) {}
+        peerRef.current = null;
+      }
+      isReconnectingRef.current = false;
+      connectToHost(true);
+    }, backoffMs);
+  };
+
+  const connectToHost = (isAutoReconnecting = false) => {
     const cleanRoom = roomId.trim();
     if (!cleanRoom) {
-      alert('Please enter a valid Session Code (e.g. 4821)!');
+      if (!isAutoReconnecting) alert('Please enter a valid Session Code (e.g. 4821)!');
       return;
     }
 
@@ -128,7 +192,13 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       ? cleanRoom.toUpperCase()
       : `SESSION-${cleanRoom.replace(/[^0-9A-Za-z]/g, '')}`;
 
-    setStatusText('Tuning into session...');
+    targetRoomIdRef.current = targetRoomId;
+    userDisconnectedRef.current = false;
+    if (!isAutoReconnecting) {
+      reconnectAttemptsRef.current = 0;
+    }
+
+    setStatusText(isAutoReconnecting ? `Re-tuning to session (${reconnectAttemptsRef.current})...` : 'Tuning into session...');
     audioProcessor.init();
 
     if (peerRef.current) {
@@ -161,6 +231,8 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
       conn.on('open', () => {
         setIsConnected(true);
+        isReconnectingRef.current = false;
+        reconnectAttemptsRef.current = 0;
         setStatusText('Tuned In • Calibrating Precision Clock');
         requestWakeLock();
 
@@ -169,38 +241,61 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
         });
 
-        // Background Sync Keeper: check clock periodically to prevent long-term crystal drift
+        // Background Sync Keeper & Stream Watchdog
         if (syncKeeperIntervalRef.current) clearInterval(syncKeeperIntervalRef.current);
+        let ticks = 0;
         syncKeeperIntervalRef.current = setInterval(async () => {
+          ticks++;
           if (connRef.current && connRef.current.open) {
-            await clockSync.startCalibration(connRef.current);
-            sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+            // Watchdog: If Host is broadcasting but audio call has not arrived, request it
+            if (hostIsBroadcastingRef.current && !isAudioActive) {
+              console.log('[Receiver Watchdog] Host broadcasting but audio stream missing — requesting stream');
+              connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
+            }
+
+            // Real NetEQ measurement
+            updateJitterBufferStats();
+
+            // Periodic NTP clock calibration (every 14s)
+            if (ticks % 4 === 0) {
+              await clockSync.startCalibration(connRef.current);
+              sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+            }
           }
-        }, 15000);
+        }, 3500);
       });
 
       conn.on('data', (data) => {
         if (data.type === 'WELCOME') {
           console.log('[Receiver] Host media title:', data.title);
+          hostIsBroadcastingRef.current = !!data.isAudioActive;
           if (data.isAudioActive) {
             setStatusText('Host broadcasting • Connecting audio...');
+            setTimeout(() => {
+              if (hostIsBroadcastingRef.current && !isAudioActive && connRef.current?.open) {
+                connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
+              }
+            }, 2000);
           } else {
             setStatusText('● Tuned In • Waiting for Host to select audio');
           }
         } else if (data.type === 'AUDIO_STARTED') {
+          hostIsBroadcastingRef.current = true;
           setStatusText('● Host started audio • Connecting...');
+          setTimeout(() => {
+            if (hostIsBroadcastingRef.current && !isAudioActive && connRef.current?.open) {
+              connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
+            }
+          }, 1500);
         } else if (data.type === 'AUDIO_STOPPED') {
+          hostIsBroadcastingRef.current = false;
           setIsAudioActive(false);
           setStatusText('● Host paused audio feed');
         } else if (data.type === 'NTP_PONG') {
-          // Process high-resolution master clock synchronization response
           clockSync.handlePong(data);
         } else if (data.type === 'SYNC_CLAPPER') {
-          // Fire scheduled acoustic tick & visual flash.
-          // Target 'default' (ctx.destination) so clapper ALWAYS sounds even before audio stream connects
           clockSync.playScheduledPulse(audioProcessor.ctx, data.targetMasterTime, triggerVisualFlash, 'default');
         } else if (data.type === 'FLEET_SYNC_TARGET') {
-          // Master Fleet Target from Host
           const fleetTargetMs = data.fleetTargetMs || 300;
           fleetTargetLagRef.current = fleetTargetMs;
           const myLag = myPhysicalLagRef.current;
@@ -209,7 +304,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           setDelayMs(neededDelay);
           audioProcessor.setDelay(neededDelay);
           setAutoSyncStatus('done');
-          setAutoSyncMsg(`⚡ Fleet Phase-Locked (Target: ${fleetTargetMs}ms | Hardware Lag: ${myLag}ms [Profile: ${hardwareProfileRef.current}] → Delay Node: +${neededDelay}ms)`);
+          setAutoSyncMsg(`⚡ Fleet Phase-Locked (Target: ${fleetTargetMs}ms | Hardware Lag: ${myLag}ms [NetEQ: ${measuredNetEqRef.current}ms] → Delay Node: +${neededDelay}ms)`);
         } else if (data.type === 'CALIBRATE_TELEMETRY') {
           if (data.fleetTargetMs) {
             fleetTargetLagRef.current = data.fleetTargetMs;
@@ -224,14 +319,22 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       });
 
       conn.on('close', () => {
+        console.warn('[Receiver] Data connection closed');
         setIsConnected(false);
         setIsAudioActive(false);
-        setStatusText('Host Transmitter Offline');
+        if (!userDisconnectedRef.current) {
+          setStatusText('Connection dropped • Auto-reconnecting...');
+          attemptReconnect();
+        } else {
+          setStatusText('Receiver Standby');
+        }
       });
 
       conn.on('error', (err) => {
         console.warn('[Receiver] Data channel error:', err);
-        setStatusText('Connection interrupted. Reconnecting...');
+        if (!userDisconnectedRef.current) {
+          attemptReconnect();
+        }
       });
 
       connRef.current = conn;
@@ -266,7 +369,17 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           }
         });
 
-        // Route audio through Web Audio API DelayNode pipeline (which manages the stream activator)
+        // Re-assert playout delay constraints now that track is active
+        try {
+          call.peerConnection.getReceivers().forEach(receiver => {
+            if (receiver.track && receiver.track.kind === 'audio') {
+              if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.04;
+              if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 40;
+            }
+          });
+        } catch (e) {}
+
+        // Route audio through Web Audio API DelayNode pipeline
         audioProcessor.setupStream(remoteAudioStream);
 
         setIsAudioActive(true);
@@ -274,13 +387,21 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
           setNeedsUserGesture(true);
         }
+
+        setTimeout(updateJitterBufferStats, 1000);
       });
 
       call.on('close', () => {
+        console.log('[Receiver] Audio call closed');
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
           setIsAudioActive(false);
-          setStatusText('Audio Feed Stopped');
+          if (hostIsBroadcastingRef.current && connRef.current?.open && !userDisconnectedRef.current) {
+            setStatusText('Audio stream reconnecting...');
+            connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
+          } else {
+            setStatusText('Audio Feed Stopped');
+          }
         }
       });
 
@@ -289,6 +410,9 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
           setIsAudioActive(false);
+          if (hostIsBroadcastingRef.current && connRef.current?.open && !userDisconnectedRef.current) {
+            connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
+          }
         }
       });
     });
@@ -297,8 +421,14 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       console.error('[Receiver] Peer error:', err);
       if (err.type === 'peer-unavailable') {
         setStatusText(`⚠️ Host ${targetRoomId.replace('SESSION-', '#')} not found. Verify code or make sure Host is open!`);
+        if (!userDisconnectedRef.current && reconnectAttemptsRef.current < 6) {
+          attemptReconnect();
+        }
       } else {
-        setStatusText('Station connection failed. Verify session code.');
+        setStatusText('Station connection failed. Auto-recovering...');
+        if (!userDisconnectedRef.current) {
+          attemptReconnect();
+        }
       }
       setIsConnected(false);
     });
@@ -320,10 +450,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       profileLag = 150; // Bluetooth earbud buffer latency
     }
 
-    const physicalLag = Math.max(0, Math.round(oneWayTransit + 35 + totalDac + profileLag + fineTune));
+    const realNetEq = measuredNetEqRef.current || 35;
+    const physicalLag = Math.max(0, Math.round(oneWayTransit + realNetEq + totalDac + profileLag + fineTune));
     myPhysicalLagRef.current = physicalLag;
 
-    console.log(`[Receiver] My Physical Lag: Transit=${Math.round(oneWayTransit)}ms + NetEQ=35ms + DAC=${totalDac}ms + Profile=${profileLag}ms (${profile}) + FineTune=${fineTune}ms = ${physicalLag}ms`);
+    console.log(`[Receiver] My Physical Lag: Transit=${Math.round(oneWayTransit)}ms + NetEQ=${realNetEq}ms + DAC=${totalDac}ms + Profile=${profileLag}ms (${profile}) + FineTune=${fineTune}ms = ${physicalLag}ms`);
 
     // Calculate local delay needed against current fleet target
     const currentFleetTarget = fleetTargetLagRef.current || 300;
@@ -338,12 +469,13 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         satellitePhysicalLag: physicalLag,
         profile,
         fineTuneMs: fineTune,
-        deviceName
+        deviceName,
+        netEqMs: realNetEq
       });
     }
 
     setAutoSyncStatus('done');
-    setAutoSyncMsg(`⚡ Fleet Synchronized (Hardware Lag: ${physicalLag}ms [Profile: ${profile}] | Delay Node: +${effectiveDelay}ms)`);
+    setAutoSyncMsg(`⚡ Fleet Synchronized (Hardware Lag: ${physicalLag}ms [NetEQ: ${realNetEq}ms | Profile: ${profile}] | Delay Node: +${effectiveDelay}ms)`);
   };
 
   const handleProfileSelect = (profile) => {
@@ -407,6 +539,13 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   };
 
   const disconnect = () => {
+    userDisconnectedRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    isReconnectingRef.current = false;
+    reconnectAttemptsRef.current = 0;
     if (syncKeeperIntervalRef.current) {
       clearInterval(syncKeeperIntervalRef.current);
       syncKeeperIntervalRef.current = null;
@@ -415,10 +554,19 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       try { activeCallRef.current.close(); } catch (e) {}
       activeCallRef.current = null;
     }
-    if (connRef.current) connRef.current.close();
-    if (peerRef.current) peerRef.current.destroy();
+    if (connRef.current) {
+      try { connRef.current.close(); } catch (e) {}
+      connRef.current = null;
+    }
+    if (peerRef.current) {
+      try { peerRef.current.destroy(); } catch (e) {}
+      peerRef.current = null;
+    }
     audioProcessor.fullDisconnect();
-    if (wakeLockRef.current) wakeLockRef.current.release();
+    if (wakeLockRef.current) {
+      try { wakeLockRef.current.release(); } catch (e) {}
+      wakeLockRef.current = null;
+    }
     setIsConnected(false);
     setIsAudioActive(false);
     setStatusText('Receiver Standby');
