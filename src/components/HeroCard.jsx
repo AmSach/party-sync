@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Radio, Speaker, Sparkles, ChevronDown, ChevronUp, Share2, HelpCircle } from 'lucide-react';
+import { Radio, Speaker, ChevronDown, ChevronUp, HelpCircle } from 'lucide-react';
 
 export default function HeroCard({ mode, setMode }) {
   const [showHowItWorks, setShowHowItWorks] = useState(true);

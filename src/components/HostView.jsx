@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import QRCode from 'qrcode';
 import { 
-  Tv, Music, Monitor, Mic, Radio, Users, Sliders, Copy, 
+  Music, Monitor, Mic, Radio, Users, Sliders, Copy, 
   Check, Volume2, VolumeX, ShieldCheck, Play, Pause, RefreshCw, QrCode,
   Zap, Clock, Wifi, Info, BellRing, Target, RotateCcw, Repeat, FileAudio, AlertCircle, Film
 } from 'lucide-react';
@@ -13,7 +13,7 @@ import LipSyncVideoMonitor from './LipSyncVideoMonitor';
 
 export default function HostView({ onBack, isPowerSave = false, onTogglePowerSave }) {
   const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-  const [roomId, setRoomId] = useState('');
+  const [roomId] = useState(() => 'SESSION-' + Math.floor(1000 + Math.random() * 9000));
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [sourceType, setSourceType] = useState(isMobile ? 'file' : 'screen');
   const [isBroadcasting, setIsBroadcasting] = useState(false);
@@ -38,6 +38,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const fileProgressTimerRef = useRef(null);
   const isFileLoopingRef = useRef(true);
   const displayMediaStreamRef = useRef(null);
+  const [videoStream, setVideoStream] = useState(null);
   const [isVideoSource, setIsVideoSource] = useState(false);
   const isVideoSourceRef = useRef(false);
 
@@ -73,10 +74,29 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const metronomeIntervalRef = useRef(null);
   const [isMetronomeActive, setIsMetronomeActive] = useState(false);
   const analyserRef = useRef(null);
+  const [analyserNode, setAnalyserNode] = useState(null);
   const activeConnectionsRef = useRef(new Map());
   const activeMediaCallsRef = useRef(new Map()); // peerId -> MediaConnection
-  const activeMediaTitleRef = useRef('No audio source selected');
-  const wakeLockRef = useRef(null);
+  const activeBlobUrlRef = useRef(null);
+
+  const getAudioContext = () => {
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      return audioContextRef.current;
+    }
+    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+    let ctx;
+    try {
+      ctx = new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
+    } catch (e) {
+      try {
+        ctx = new AudioCtxClass({ latencyHint: 'interactive' });
+      } catch (e2) {
+        ctx = new AudioCtxClass();
+      }
+    }
+    audioContextRef.current = ctx;
+    return ctx;
+  };
 
   const requestWakeLock = async () => {
     try {
@@ -90,10 +110,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   };
 
   useEffect(() => {
-    const randomCode = 'SESSION-' + Math.floor(1000 + Math.random() * 9000);
-    setRoomId(randomCode);
-
-    const joinUrl = `${window.location.origin}?room=${randomCode}`;
+    const joinUrl = `${window.location.origin}?room=${roomId}`;
     QRCode.toDataURL(joinUrl, {
       width: 240,
       margin: 2,
@@ -101,7 +118,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     }).then(url => setQrDataUrl(url));
 
     // Initialize Host Peer immediately on signaling network
-    initHostPeer(randomCode);
+    initHostPeer(roomId);
     requestWakeLock();
 
     // Mobile gesture unlock listener: touching screen resumes AudioContext if suspended
@@ -226,18 +243,26 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
         }
       });
 
+      const handlePeerDisconnect = (peerId) => {
+        activeConnectionsRef.current.delete(peerId);
+        satelliteLagsRef.current.delete(peerId);
+        const call = activeMediaCallsRef.current.get(peerId);
+        if (call) {
+          try { call.close(); } catch (e) {}
+          activeMediaCallsRef.current.delete(peerId);
+        }
+        setConnectedPeers(prev => prev.filter(p => p.id !== peerId));
+        recalculateFleetSync();
+      };
+
       conn.on('close', () => {
         console.log('[Host] Satellite disconnected:', conn.peer);
-        activeConnectionsRef.current.delete(conn.peer);
-        satelliteLagsRef.current.delete(conn.peer);
-        setConnectedPeers(prev => prev.filter(p => p.id !== conn.peer));
-        recalculateFleetSync();
+        handlePeerDisconnect(conn.peer);
       });
 
       conn.on('error', (err) => {
         console.warn('[Host] Peer connection error:', err);
-        activeConnectionsRef.current.delete(conn.peer);
-        setConnectedPeers(prev => prev.filter(p => p.id !== conn.peer));
+        handlePeerDisconnect(conn.peer);
       });
     });
 
@@ -250,8 +275,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
   // EMIT ACOUSTIC & VISUAL SYNC PULSE (SYNC CLAPPER)
   const emitSyncPulse = () => {
-    const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
-    audioContextRef.current = ctx;
+    const ctx = getAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
     const targetMasterTime = clockSync.now() + 350; // Fire 350ms in the future across all devices
@@ -344,6 +368,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 128;
       analyserRef.current = analyser;
+      setAnalyserNode(analyser);
     }
     if (!hostDelayNodeRef.current) {
       const hostDelay = ctx.createDelay(3.0);
@@ -363,9 +388,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     const buffer = audioBufferRef.current;
     if (!buffer) return;
 
-    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-    const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
-    audioContextRef.current = ctx;
+    const ctx = getAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
     ensureHostAudioNodes(ctx);
@@ -522,6 +545,11 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     stopBroadcasting(false);
     pauseBufferPlayback();
 
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      alert("Screen and system audio capture is only supported on Desktop browsers (Windows, Mac, Linux, Chromebook). Mobile operating systems (iOS & Android) forbid web browsers from recording audio from other apps due to sandbox security. To broadcast from a mobile phone, please select 'Local Audio / Video File', 'Analog Lofi Groove', or 'Live Microphone'!");
+      return;
+    }
+
     let mediaStream;
     try {
       // 1. First attempt: standard system audio capture with suppressLocalAudioPlayback (eliminates double-sound echo!)
@@ -583,6 +611,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     });
 
     displayMediaStreamRef.current = mediaStream;
+    setVideoStream(mediaStream);
 
     // Create audio-only stream for WebRTC broadcast & host delayed playback
     const audioOnlyStream = new MediaStream(audioTracks);
@@ -603,9 +632,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     setActiveMediaTitle(file.name);
     activeMediaTitleRef.current = file.name;
 
-    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-    const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
-    audioContextRef.current = ctx;
+    const ctx = getAudioContext();
     if (ctx.state === 'suspended') await ctx.resume();
 
     if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
@@ -618,11 +645,18 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       isVideoSourceRef.current = true;
       setIsFileDecoding(false);
 
+      if (activeBlobUrlRef.current) {
+        try { URL.revokeObjectURL(activeBlobUrlRef.current); } catch (err) {}
+        activeBlobUrlRef.current = null;
+      }
+
       const video = videoElementRef.current;
       if (video) {
+        const blobUrl = URL.createObjectURL(file);
+        activeBlobUrlRef.current = blobUrl;
         video.setAttribute('playsinline', 'true');
         video.setAttribute('webkit-playsinline', 'true');
-        video.src = URL.createObjectURL(file);
+        video.src = blobUrl;
         video.loop = isFileLoopingRef.current;
 
         ensureHostAudioNodes(ctx);
@@ -645,13 +679,13 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
           }
         }
 
-        // Capture video stream for LipSyncVideoMonitor
         try {
           if (video.captureStream) {
             displayMediaStreamRef.current = video.captureStream();
           } else if (video.mozCaptureStream) {
             displayMediaStreamRef.current = video.mozCaptureStream();
           }
+          setVideoStream(displayMediaStreamRef.current);
         } catch (e) {}
 
         video.onloadedmetadata = () => {
@@ -699,6 +733,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
         video.play().catch(e => console.warn('[Host] Video autoplay blocked, tap play to start:', e));
       }
+      if (e.target) e.target.value = '';
       return;
     }
 
@@ -726,6 +761,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       console.error("[Host] Audio decoding failed:", err);
       setIsFileDecoding(false);
       alert("Failed to decode audio file. Please try another MP3, WAV, or AAC file.");
+    } finally {
+      if (e.target) e.target.value = '';
     }
   };
 
@@ -764,9 +801,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     stopBroadcasting(false);
     pauseBufferPlayback();
 
-    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-    const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
-    audioContextRef.current = ctx;
+    const ctx = getAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
     ensureHostAudioNodes(ctx);
@@ -836,9 +871,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     });
 
     try {
-      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-      const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
-      audioContextRef.current = ctx;
+      const ctx = getAudioContext();
       if (ctx.state === 'suspended') ctx.resume();
 
       // Build shared nodes (fresh every broadcast session since stopBroadcasting nulls them)
@@ -1037,6 +1070,10 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
         videoElementRef.current.load();
       } catch (e) {}
     }
+    if (activeBlobUrlRef.current) {
+      try { URL.revokeObjectURL(activeBlobUrlRef.current); } catch (e) {}
+      activeBlobUrlRef.current = null;
+    }
     setIsVideoSource(false);
     isVideoSourceRef.current = false;
 
@@ -1054,6 +1091,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       displayMediaStreamRef.current.getTracks().forEach(t => t.stop());
       displayMediaStreamRef.current = null;
     }
+    setVideoStream(null);
 
     if (hostSourceNodeRef.current) {
       try { hostSourceNodeRef.current.disconnect(); } catch (e) {}
@@ -1077,6 +1115,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       try { analyserRef.current.disconnect(); } catch (e) {}
       analyserRef.current = null;
     }
+    setAnalyserNode(null);
 
     activeMediaCallsRef.current.forEach(call => {
       try { call.close(); } catch (e) {}
@@ -1271,7 +1310,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
             </button>
 
             <label 
-              className={`btn-analog ${sourceType === 'file' && (isBroadcasting || audioBufferRef.current) ? 'btn-amber' : ''}`}
+              className={`btn-analog ${sourceType === 'file' && (isBroadcasting || fileAudioBuffer) ? 'btn-amber' : ''}`}
               style={{ padding: '14px', justifyContent: 'flex-start', cursor: 'pointer' }}
             >
               <Music size={18} />
@@ -1706,15 +1745,14 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
             </span>
           </div>
 
-          <Visualizer analyser={analyserRef.current} active={isBroadcasting} height={54} powerSave={isPowerSave} />
+          <Visualizer analyser={analyserNode} active={isBroadcasting} height={54} powerSave={isPowerSave} />
         </div>
 
         {/* Frame-Accurate Video Delay Lip-Sync Monitor for System Screen / Tab Video or Local Movie */}
-        {((sourceType === 'screen' && displayMediaStreamRef.current) || (sourceType === 'file' && isVideoSource && displayMediaStreamRef.current)) && isBroadcasting ? (
+        {((sourceType === 'screen' && videoStream) || (sourceType === 'file' && isVideoSource && videoStream)) && isBroadcasting ? (
           <LipSyncVideoMonitor 
-            stream={displayMediaStreamRef.current} 
+            stream={videoStream} 
             audioDelayMs={hostDelayMs} 
-            title={activeMediaTitle} 
           />
         ) : null}
 
@@ -1728,7 +1766,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
             width: '100%', 
             maxHeight: '180px', 
             borderRadius: '10px', 
-            display: (sourceType === 'file' && isVideoSource && !displayMediaStreamRef.current) ? 'block' : 'none' 
+            display: (sourceType === 'file' && isVideoSource && !videoStream) ? 'block' : 'none' 
           }} 
         />
 

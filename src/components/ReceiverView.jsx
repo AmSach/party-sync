@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
-  Speaker, Sliders, Volume2, Maximize, Smartphone, 
-  CheckCircle2, Radio, Zap, AlertTriangle, ShieldCheck, Power,
-  Clock, Music, Bluetooth, Headphones, Cable, RefreshCw, Mic, Target
+  Volume2, Maximize, Smartphone, 
+  Zap, Power, Clock, Bluetooth, Headphones, Cable, RefreshCw, Target
 } from 'lucide-react';
 import { audioProcessor } from '../utils/audio';
 import { clockSync } from '../utils/clockSync';
@@ -69,6 +68,45 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
   const [needsUserGesture, setNeedsUserGesture] = useState(false);
 
+  const disconnect = () => {
+    userDisconnectedRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    isReconnectingRef.current = false;
+    reconnectAttemptsRef.current = 0;
+    if (syncKeeperIntervalRef.current) {
+      clearInterval(syncKeeperIntervalRef.current);
+      syncKeeperIntervalRef.current = null;
+    }
+    if (activeCallRef.current) {
+      try { activeCallRef.current.close(); } catch (e) {}
+      activeCallRef.current = null;
+    }
+    if (webrtcStreamRef.current) {
+      try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
+      webrtcStreamRef.current = null;
+    }
+    if (connRef.current) {
+      try { connRef.current.close(); } catch (e) {}
+      connRef.current = null;
+    }
+    if (peerRef.current) {
+      try { peerRef.current.destroy(); } catch (e) {}
+      peerRef.current = null;
+    }
+    audioProcessor.fullDisconnect();
+    if (wakeLockRef.current) {
+      try { wakeLockRef.current.release(); } catch (e) {}
+      wakeLockRef.current = null;
+    }
+    setIsConnected(false);
+    isAudioActiveRef.current = false;
+    setIsAudioActive(false);
+    setStatusText('Receiver Standby');
+  };
+
   useEffect(() => {
     if (initialRoomId) {
       setRoomId(initialRoomId);
@@ -117,12 +155,14 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   // Isolated so toggling isAudioActive never re-registers listeners or triggers disconnect.
   useEffect(() => {
     const checkCtxInterval = setInterval(() => {
-      if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended' && isAudioActive) {
+      const isContextSuspended = audioProcessor.ctx && audioProcessor.ctx.state === 'suspended';
+      const isActivatorPaused = audioProcessor.streamActivator && audioProcessor.streamActivator.paused;
+      if ((isContextSuspended || isActivatorPaused) && isAudioActive) {
         setNeedsUserGesture(true);
-      } else if (audioProcessor.ctx && audioProcessor.ctx.state === 'running') {
+      } else if (audioProcessor.ctx && audioProcessor.ctx.state === 'running' && (!audioProcessor.streamActivator || !audioProcessor.streamActivator.paused)) {
         setNeedsUserGesture(false);
       }
-    }, 2000);
+    }, 1500);
     return () => clearInterval(checkCtxInterval);
   }, [isAudioActive]);
 
@@ -234,6 +274,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       const conn = peer.connect(targetRoomId, {
         metadata: { name: deviceName }
       });
+      connRef.current = conn;
 
       conn.on('open', () => {
         setIsConnected(true);
@@ -394,6 +435,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         } catch (e) {}
 
         // Route audio through Web Audio API DelayNode pipeline
+        webrtcStreamRef.current = remoteAudioStream;
         audioProcessor.setupStream(remoteAudioStream);
 
         isAudioActiveRef.current = true;
@@ -410,6 +452,10 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         console.log('[Receiver] Audio call closed');
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
+          if (webrtcStreamRef.current) {
+            try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
+            webrtcStreamRef.current = null;
+          }
           isAudioActiveRef.current = false;
           setIsAudioActive(false);
           const now = Date.now();
@@ -427,6 +473,10 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         console.warn('[Receiver] Media call error:', err);
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
+          if (webrtcStreamRef.current) {
+            try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
+            webrtcStreamRef.current = null;
+          }
           isAudioActiveRef.current = false;
           setIsAudioActive(false);
           const now = Date.now();
@@ -512,10 +562,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
     sendLagUpdateToHost(hardwareProfileRef.current, clamped);
   };
 
-  const handleNudgeChange = (val) => {
-    handleFineTuneChange(val);
-  };
-
   const handleVolumeChange = (vol) => {
     setVolume(vol);
     audioProcessor.setVolume(vol);
@@ -552,46 +598,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
     // 2. Transmit true latency to host and calibrate
     sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
     triggerVisualFlash();
-  };
-
-  const applyTelemetrySync = (hostDelay = 350, rtt = 10, isHostMuted = false) => {
-    sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
-    triggerVisualFlash();
-  };
-
-  const disconnect = () => {
-    userDisconnectedRef.current = true;
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-    isReconnectingRef.current = false;
-    reconnectAttemptsRef.current = 0;
-    if (syncKeeperIntervalRef.current) {
-      clearInterval(syncKeeperIntervalRef.current);
-      syncKeeperIntervalRef.current = null;
-    }
-    if (activeCallRef.current) {
-      try { activeCallRef.current.close(); } catch (e) {}
-      activeCallRef.current = null;
-    }
-    if (connRef.current) {
-      try { connRef.current.close(); } catch (e) {}
-      connRef.current = null;
-    }
-    if (peerRef.current) {
-      try { peerRef.current.destroy(); } catch (e) {}
-      peerRef.current = null;
-    }
-    audioProcessor.fullDisconnect();
-    if (wakeLockRef.current) {
-      try { wakeLockRef.current.release(); } catch (e) {}
-      wakeLockRef.current = null;
-    }
-    setIsConnected(false);
-    isAudioActiveRef.current = false;
-    setIsAudioActive(false);
-    setStatusText('Receiver Standby');
   };
 
   return (

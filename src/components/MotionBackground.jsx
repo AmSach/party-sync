@@ -2,6 +2,29 @@ import React, { useEffect } from 'react';
 import { motion, useMotionValue, useSpring } from 'motion/react';
 
 export default function MotionBackground({ powerSave = false }) {
+  // Smooth mouse parallax physics via motion.dev springs
+  const mouseX = useMotionValue(0);
+  const mouseY = useMotionValue(0);
+
+  const springConfig = { damping: 30, stiffness: 60 };
+  const smoothX = useSpring(mouseX, springConfig);
+  const smoothY = useSpring(mouseY, springConfig);
+
+  useEffect(() => {
+    if (powerSave) return;
+    const handleMouseMove = (e) => {
+      const { innerWidth, innerHeight } = window;
+      // Calculate normalized offset from center (-1 to 1)
+      const x = (e.clientX - innerWidth / 2) / (innerWidth / 2);
+      const y = (e.clientY - innerHeight / 2) / (innerHeight / 2);
+      mouseX.set(x * 35);
+      mouseY.set(y * 35);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove, { passive: true });
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, [mouseX, mouseY, powerSave]);
+
   // Ultra Power Saving Mode: completely unmount GPU animation layers
   if (powerSave) {
     return (
@@ -19,28 +42,6 @@ export default function MotionBackground({ powerSave = false }) {
       />
     );
   }
-
-  // Smooth mouse parallax physics via motion.dev springs
-  const mouseX = useMotionValue(0);
-  const mouseY = useMotionValue(0);
-
-  const springConfig = { damping: 30, stiffness: 60 };
-  const smoothX = useSpring(mouseX, springConfig);
-  const smoothY = useSpring(mouseY, springConfig);
-
-  useEffect(() => {
-    const handleMouseMove = (e) => {
-      const { innerWidth, innerHeight } = window;
-      // Calculate normalized offset from center (-1 to 1)
-      const x = (e.clientX - innerWidth / 2) / (innerWidth / 2);
-      const y = (e.clientY - innerHeight / 2) / (innerHeight / 2);
-      mouseX.set(x * 35);
-      mouseY.set(y * 35);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove, { passive: true });
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, [mouseX, mouseY]);
 
   return (
     <div

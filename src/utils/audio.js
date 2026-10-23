@@ -25,7 +25,15 @@ class SyncedAudioProcessor {
 
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
+      try {
+        this.ctx = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
+      } catch (err) {
+        try {
+          this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
+        } catch (err2) {
+          this.ctx = new AudioContextClass();
+        }
+      }
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume().catch(() => {});
@@ -33,7 +41,7 @@ class SyncedAudioProcessor {
 
     // Mobile unlock: play a 1-sample silent buffer to unlock audio hardware pipeline
     try {
-      const buffer = this.ctx.createBuffer(1, 1, 22050);
+      const buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate || 48000);
       const source = this.ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(this.ctx.destination);

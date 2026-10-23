@@ -22,38 +22,62 @@ class ClockSynchronizer {
     this.isSynced = false;
     this._isCalibrating = true;
 
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
+    if (this._safetyTimeout) {
+      clearTimeout(this._safetyTimeout);
+      this._safetyTimeout = null;
+    }
+
     return new Promise((resolve) => {
       this._resolveCalibration = resolve;
       let count = 0;
-      let timer = null;
 
-      // Safety timeout: Never hang promise indefinitely if packets are lost
-      const timeout = setTimeout(() => {
-        if (timer) clearInterval(timer);
+      // Safety timeout: finalize calibration after 1000ms if not enough pongs arrived
+      this._safetyTimeout = setTimeout(() => {
+        if (this._pingTimer) {
+          clearInterval(this._pingTimer);
+          this._pingTimer = null;
+        }
         this.finalizeCalibration();
-      }, 1200);
+      }, 1000);
 
       const sendPing = () => {
-        if (count >= 8 || !conn.open) {
-          if (timer) clearInterval(timer);
-          clearTimeout(timeout);
+        if (!conn.open) {
+          if (this._pingTimer) {
+            clearInterval(this._pingTimer);
+            this._pingTimer = null;
+          }
           this.finalizeCalibration();
           return;
         }
         count++;
         const t0 = performance.now();
         conn.send({ type: 'NTP_PING', t0, seq: count });
+        if (count >= 8) {
+          if (this._pingTimer) {
+            clearInterval(this._pingTimer);
+            this._pingTimer = null;
+          }
+        }
       };
 
-      // Burst 8 pings spaced by 35ms to find the cleanest network route
-      timer = setInterval(() => {
-        sendPing();
-        if (count >= 8) {
-          clearInterval(timer);
-          clearTimeout(timeout);
-          this.finalizeCalibration();
+      // Send first ping immediately at t=0
+      sendPing();
+
+      // Burst remaining 7 pings spaced by 30ms
+      this._pingTimer = setInterval(() => {
+        if (!conn.open || count >= 8) {
+          if (this._pingTimer) {
+            clearInterval(this._pingTimer);
+            this._pingTimer = null;
+          }
+          return;
         }
-      }, 35);
+        sendPing();
+      }, 30);
     });
   }
 
@@ -81,12 +105,20 @@ class ClockSynchronizer {
     const offset = ((t1 - t0) + (t2 - t3)) / 2;
 
     this.samples.push({ rtt: roundTrip, offset });
-    if (this.samples.length >= 6) {
+    if (this.samples.length >= 7) {
       this.finalizeCalibration();
     }
   }
 
   finalizeCalibration() {
+    if (this._safetyTimeout) {
+      clearTimeout(this._safetyTimeout);
+      this._safetyTimeout = null;
+    }
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
     if (!this._isCalibrating) return;
     this._isCalibrating = false;
 

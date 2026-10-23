@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Battery, BatteryCharging, Zap, Power, Volume2, ShieldCheck, Sun } from 'lucide-react';
+import { Battery, BatteryCharging, Zap, Sun } from 'lucide-react';
 
 export default function UltraPowerSaver({ onWake, mode = 'host', activeMediaTitle = '' }) {
   const [time, setTime] = useState('');

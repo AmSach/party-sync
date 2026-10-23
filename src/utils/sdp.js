@@ -33,8 +33,8 @@ export function configureHighFidelityAudioSDP(sdp) {
         return `a=fmtp:${pt} ${filtered ? filtered + ';' : ''}${studioParams}`;
       });
     } else {
-      const rtpmapRegex = new RegExp(`(a=rtpmap:${pt}\\s+opus\\/48000\\/[^\\r\\n]+[\\r\\n]+)`, 'i');
-      modified = modified.replace(rtpmapRegex, `$1a=fmtp:${pt} ${studioParams}\r\n`);
+      const rtpmapRegex = new RegExp(`(a=rtpmap:${pt}\\s+opus\\/48000\\/[^\\r\\n]+)(\\r?\\n)`, 'i');
+      modified = modified.replace(rtpmapRegex, `$1$2a=fmtp:${pt} ${studioParams}$2`);
     }
   }
 
@@ -43,7 +43,8 @@ export function configureHighFidelityAudioSDP(sdp) {
 
 // Automatically monkey-patch RTCPeerConnection once on load
 // Ensures all PeerJS and WebRTC calls universally transmit pristine Hi-Fi stereo music
-if (typeof window !== 'undefined' && window.RTCPeerConnection) {
+if (typeof window !== 'undefined' && window.RTCPeerConnection && !window.RTCPeerConnection.__hiFiPatched) {
+  window.RTCPeerConnection.__hiFiPatched = true;
   const origSetLocalDescription = window.RTCPeerConnection.prototype.setLocalDescription;
   window.RTCPeerConnection.prototype.setLocalDescription = function (desc) {
     if (desc && desc.sdp) {

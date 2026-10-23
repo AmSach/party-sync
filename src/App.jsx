@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Radio, Speaker, Tv, Download, Disc3, Sparkles, Zap, Moon } from 'lucide-react';
+import { Download, Disc3, Zap } from 'lucide-react';
 import HeroCard from './components/HeroCard';
 import HostView from './components/HostView';
 import ReceiverView from './components/ReceiverView';
@@ -7,23 +7,33 @@ import MotionBackground from './components/MotionBackground';
 import UltraPowerSaver from './components/UltraPowerSaver';
 
 export default function App() {
-  const [mode, setMode] = useState('host'); // Default directly into a working console, no split tab landing screen!
-  const [roomFromUrl, setRoomFromUrl] = useState('');
+  const [roomFromUrl] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('room') || '';
+    }
+    return '';
+  });
+
+  const [mode, setMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('room')) return 'receiver';
+    }
+    return 'host';
+  });
+
   const [installPrompt, setInstallPrompt] = useState(null);
   const [isPowerSave, setIsPowerSave] = useState(false);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const room = params.get('room');
-    if (room) {
-      setRoomFromUrl(room);
-      setMode('receiver'); // Auto switch to tune-in when joining via friend's link
-    }
-
-    window.addEventListener('beforeinstallprompt', (e) => {
+    const handleBeforeInstall = (e) => {
       e.preventDefault();
       setInstallPrompt(e);
-    });
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
   }, []);
 
   const handleInstallPWA = async () => {

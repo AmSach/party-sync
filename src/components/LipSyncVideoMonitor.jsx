@@ -1,11 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Film, Maximize2, Minimize2, Sliders, ExternalLink, Clock, Play, Pause, RotateCcw } from 'lucide-react';
+import { Film, Maximize2, Minimize2, ExternalLink } from 'lucide-react';
 
 export default function LipSyncVideoMonitor({ 
   stream, 
-  audioDelayMs = 200, 
-  onDelayChange, 
-  title = 'System Screen Capture' 
+  audioDelayMs = 200
 }) {
   const [isDelayed, setIsDelayed] = useState(true);
   const [fineTuneMs, setFineTuneMs] = useState(0);
@@ -40,8 +38,8 @@ export default function LipSyncVideoMonitor({
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: false });
+    const queue = frameQueueRef.current;
 
-    let lastTime = performance.now();
     let lastFpsUpdate = performance.now();
     let frameCount = 0;
     let isCapturingFrame = false;
@@ -76,15 +74,23 @@ export default function LipSyncVideoMonitor({
         return;
       }
 
+      // Dynamic frame queue capacity based on requested delay (prevents clamping at high delays)
+      const maxBufferedFrames = Math.max(35, Math.ceil((delayNeeded / 1000) * 60) + 15);
+
       // Capture frame into ImageBitmap with queue limit and in-flight guard
-      if (!isCapturingFrame && frameQueueRef.current.length < 35) {
+      if (!isCapturingFrame && frameQueueRef.current.length < maxBufferedFrames) {
         isCapturingFrame = true;
         try {
-          const maxDim = 1920;
-          const opts = video.videoWidth > maxDim 
-            ? { resizeWidth: maxDim, resizeQuality: 'medium' } 
-            : undefined;
-          const bitmap = await (opts ? createImageBitmap(video, opts) : createImageBitmap(video));
+          let bitmap;
+          try {
+            const maxDim = 1920;
+            const opts = video.videoWidth > maxDim 
+              ? { resizeWidth: maxDim, resizeQuality: 'medium' } 
+              : undefined;
+            bitmap = opts ? await createImageBitmap(video, opts) : await createImageBitmap(video);
+          } catch (optErr) {
+            bitmap = await createImageBitmap(video);
+          }
           frameQueueRef.current.push({ bitmap, time: performance.now() });
         } catch (e) {
           // Fallback if bitmap fails
@@ -111,15 +117,16 @@ export default function LipSyncVideoMonitor({
         const targetFrame = queue[bestIndex];
         ctx.drawImage(targetFrame.bitmap, 0, 0, canvas.width, canvas.height);
 
-        // Discard frames older than the displayed frame to save memory
-        for (let i = 0; i <= bestIndex; i++) {
+        // Discard frames strictly older than bestIndex to save memory
+        // Keep targetFrame at bestIndex until a newer frame timestamp arrives
+        for (let i = 0; i < bestIndex; i++) {
           const old = queue.shift();
           if (old && old.bitmap && typeof old.bitmap.close === 'function') {
             old.bitmap.close();
           }
         }
       } else if (queue.length > 0) {
-        // Buffer warming up
+        // Buffer warming up: display earliest frame
         ctx.drawImage(queue[0].bitmap, 0, 0, canvas.width, canvas.height);
       }
     };
@@ -128,8 +135,8 @@ export default function LipSyncVideoMonitor({
 
     return () => {
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      while (frameQueueRef.current.length > 0) {
-        const f = frameQueueRef.current.shift();
+      while (queue.length > 0) {
+        const f = queue.shift();
         if (f && f.bitmap && typeof f.bitmap.close === 'function') f.bitmap.close();
       }
     };
@@ -145,13 +152,30 @@ export default function LipSyncVideoMonitor({
   };
 
   useEffect(() => {
-    const handlePipLeave = () => setIsPipActive(false);
+    const handlePipLeave = () => {
+      setIsPipActive(false);
+      const video = pipVideoRef.current;
+      if (video && video.srcObject) {
+        try {
+          video.srcObject.getTracks().forEach(t => t.stop());
+        } catch (e) {}
+        video.srcObject = null;
+      }
+    };
     const video = pipVideoRef.current;
     if (video) {
       video.addEventListener('leavepictureinpicture', handlePipLeave);
     }
     return () => {
-      if (video) video.removeEventListener('leavepictureinpicture', handlePipLeave);
+      if (video) {
+        video.removeEventListener('leavepictureinpicture', handlePipLeave);
+        if (video.srcObject) {
+          try {
+            video.srcObject.getTracks().forEach(t => t.stop());
+          } catch (e) {}
+          video.srcObject = null;
+        }
+      }
     };
   }, []);
 
@@ -257,10 +281,16 @@ export default function LipSyncVideoMonitor({
             onClick={togglePip}
             className="btn-analog"
             title="Pop out into floating Picture-in-Picture window"
-            style={{ padding: '4px 8px', fontSize: '11px' }}
+            style={{ 
+              padding: '4px 8px', 
+              fontSize: '11px',
+              background: isPipActive ? 'rgba(34, 211, 238, 0.2)' : undefined,
+              borderColor: isPipActive ? 'var(--accent-bright)' : undefined,
+              color: isPipActive ? 'var(--accent-bright)' : undefined
+            }}
           >
             <ExternalLink size={13} />
-            <span>PiP</span>
+            <span>{isPipActive ? 'In PiP' : 'PiP'}</span>
           </button>
 
           <button
