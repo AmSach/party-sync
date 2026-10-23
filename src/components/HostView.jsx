@@ -679,22 +679,32 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
           }
         }
 
-        try {
-          if (video.captureStream) {
-            displayMediaStreamRef.current = video.captureStream();
-          } else if (video.mozCaptureStream) {
-            displayMediaStreamRef.current = video.mozCaptureStream();
+        const setupCapture = () => {
+          if (!displayMediaStreamRef.current) {
+            try {
+              if (typeof video.captureStream === 'function') {
+                displayMediaStreamRef.current = video.captureStream();
+              } else if (typeof video.mozCaptureStream === 'function') {
+                displayMediaStreamRef.current = video.mozCaptureStream();
+              }
+              if (displayMediaStreamRef.current) {
+                setVideoStream(displayMediaStreamRef.current);
+              }
+            } catch (e) {}
           }
-          setVideoStream(displayMediaStreamRef.current);
-        } catch (e) {}
+        };
+
+        setupCapture();
 
         video.onloadedmetadata = () => {
           setFileDuration(video.duration || 0);
+          setupCapture();
         };
         video.ontimeupdate = () => {
           setFileCurrentTime(video.currentTime || 0);
         };
         video.onplay = () => {
+          setupCapture();
           setIsFilePlaying(true);
           setIsBroadcasting(true);
           activeConnectionsRef.current.forEach(c => {
@@ -1752,7 +1762,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
         {((sourceType === 'screen' && videoStream) || (sourceType === 'file' && isVideoSource && videoStream)) && isBroadcasting ? (
           <LipSyncVideoMonitor 
             stream={videoStream} 
-            audioDelayMs={hostDelayMs} 
+            audioDelayMs={fleetTargetMs || hostDelayMs} 
           />
         ) : null}
 
