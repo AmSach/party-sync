@@ -38,6 +38,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const fileProgressTimerRef = useRef(null);
   const isFileLoopingRef = useRef(true);
   const displayMediaStreamRef = useRef(null);
+  const [isVideoSource, setIsVideoSource] = useState(false);
+  const isVideoSourceRef = useRef(false);
 
   // Host local playback pipeline delay & mute controls
   const [laptopMuted, setLaptopMuted] = useState(isMobile ? false : true);
@@ -293,7 +295,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     }
 
     const existingCall = activeMediaCallsRef.current.get(peerId);
-    if (existingCall && existingCall.open && existingCall._localStream === stream) {
+    const isCallConnected = existingCall && (existingCall.open || (existingCall.peerConnection && ['connected', 'completed'].includes(existingCall.peerConnection.iceConnectionState)));
+    if (isCallConnected && existingCall._localStream === stream) {
       console.log(`[Host] Media call to ${peerId} already active on this stream, skipping redundant call`);
       return;
     }
@@ -455,6 +458,15 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   };
 
   const toggleFilePlayback = () => {
+    if (isVideoSourceRef.current && videoElementRef.current) {
+      if (videoElementRef.current.paused) {
+        videoElementRef.current.play().catch(() => {});
+      } else {
+        videoElementRef.current.pause();
+      }
+      return;
+    }
+
     if (isFilePlaying) {
       pauseBufferPlayback();
     } else {
@@ -463,6 +475,11 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   };
 
   const restartFilePlayback = () => {
+    if (isVideoSourceRef.current && videoElementRef.current) {
+      videoElementRef.current.currentTime = 0;
+      videoElementRef.current.play().catch(() => {});
+      return;
+    }
     bufferPauseOffsetRef.current = 0;
     setFileCurrentTime(0);
     playBufferAtOffset(0);
@@ -472,8 +489,23 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     const nextLoop = !isFileLooping;
     setIsFileLooping(nextLoop);
     isFileLoopingRef.current = nextLoop;
+    if (isVideoSourceRef.current && videoElementRef.current) {
+      videoElementRef.current.loop = nextLoop;
+    }
     if (bufferSourceNodeRef.current) {
       bufferSourceNodeRef.current.loop = nextLoop;
+    }
+  };
+
+  const handleSeek = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const targetTime = pos * fileDuration;
+    if (isVideoSourceRef.current && videoElementRef.current) {
+      videoElementRef.current.currentTime = targetTime;
+      setFileCurrentTime(targetTime);
+    } else if (audioBufferRef.current) {
+      playBufferAtOffset(targetTime);
     }
   };
 
@@ -490,10 +522,11 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
     let mediaStream;
     try {
-      // 1. First attempt: standard system audio capture constraints
+      // 1. First attempt: standard system audio capture with suppressLocalAudioPlayback (eliminates double-sound echo!)
       mediaStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: {
+          suppressLocalAudioPlayback: true,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -506,7 +539,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     } catch (firstErr) {
       console.warn('[Host] Advanced getDisplayMedia constraints failed, trying universal fallback:', firstErr);
       try {
-        // 2. Second attempt: broadest possible video+audio constraints (works on Android Chrome and all platforms)
+        // 2. Second attempt: broadest possible video+audio constraints
         mediaStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: true,
@@ -552,8 +585,9 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     // Create audio-only stream for WebRTC broadcast & host delayed playback
     const audioOnlyStream = new MediaStream(audioTracks);
 
-    setLaptopMuted(false);
-    setupHostAudio(audioOnlyStream, false);
+    // Default laptop speakers to MUTED for screen capture to prevent double-audio echo flanging
+    setLaptopMuted(true);
+    setupHostAudio(audioOnlyStream, false, true);
   };
 
   const handleFileUpload = async (e) => {
@@ -566,31 +600,111 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
     setActiveMediaTitle(file.name);
     activeMediaTitleRef.current = file.name;
-    setIsFileDecoding(true);
 
-    // If file contains video, mount to preview element
-    if (file.type.startsWith('video/') && videoElementRef.current) {
-      try {
-        videoElementRef.current.src = URL.createObjectURL(file);
-        videoElementRef.current.style.display = 'block';
-      } catch (e) {}
-    } else if (videoElementRef.current) {
-      videoElementRef.current.src = '';
-      videoElementRef.current.style.display = 'none';
+    const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
+    audioContextRef.current = ctx;
+    if (ctx.state === 'suspended') await ctx.resume();
+
+    if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+      try { navigator.audioSession.type = 'playback'; } catch (err) {}
     }
 
-    try {
-      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-      const ctx = audioContextRef.current || new AudioCtxClass({ latencyHint: 'interactive', sampleRate: 48000 });
-      audioContextRef.current = ctx;
-      if (ctx.state === 'suspended') await ctx.resume();
+    // Video Movie File Mode (Instant streaming without 2GB RAM decode)
+    if (file.type.startsWith('video/')) {
+      setIsVideoSource(true);
+      isVideoSourceRef.current = true;
+      setIsFileDecoding(false);
 
-      if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
-        try { navigator.audioSession.type = 'playback'; } catch (err) {}
+      const video = videoElementRef.current;
+      if (video) {
+        video.src = URL.createObjectURL(file);
+        video.loop = isFileLoopingRef.current;
+
+        ensureHostAudioNodes(ctx);
+
+        if (!mediaElementSourceRef.current) {
+          try {
+            mediaElementSourceRef.current = ctx.createMediaElementSource(video);
+          } catch (err) {
+            console.warn('[Host] MediaElementSource creation notice:', err);
+          }
+        }
+        if (mediaElementSourceRef.current) {
+          try { mediaElementSourceRef.current.disconnect(); } catch (e) {}
+          try {
+            mediaElementSourceRef.current.connect(streamDestRef.current);
+            mediaElementSourceRef.current.connect(hostDelayNodeRef.current);
+            mediaElementSourceRef.current.connect(analyserRef.current);
+          } catch (e) {
+            console.warn('[Host] MediaElementSource connect notice:', e);
+          }
+        }
+
+        // Capture video stream for LipSyncVideoMonitor
+        try {
+          if (video.captureStream) {
+            displayMediaStreamRef.current = video.captureStream();
+          } else if (video.mozCaptureStream) {
+            displayMediaStreamRef.current = video.mozCaptureStream();
+          }
+        } catch (e) {}
+
+        video.onloadedmetadata = () => {
+          setFileDuration(video.duration || 0);
+        };
+        video.ontimeupdate = () => {
+          setFileCurrentTime(video.currentTime || 0);
+        };
+        video.onplay = () => {
+          setIsFilePlaying(true);
+          setIsBroadcasting(true);
+          activeConnectionsRef.current.forEach(c => {
+            if (c.open) c.send({ type: 'AUDIO_STARTED', title: file.name });
+          });
+        };
+        video.onpause = () => {
+          setIsFilePlaying(false);
+          activeConnectionsRef.current.forEach(c => {
+            if (c.open) c.send({ type: 'AUDIO_STOPPED' });
+          });
+        };
+        video.onended = () => {
+          if (!isFileLoopingRef.current) {
+            setIsFilePlaying(false);
+            setFileCurrentTime(0);
+          }
+        };
+
+        // Laptop speakers: unmuted and delayed to match phones
+        laptopMutedRef.current = false;
+        setLaptopMuted(false);
+        if (hostGainNodeRef.current) {
+          hostGainNodeRef.current.gain.setValueAtTime(1.0, ctx.currentTime);
+        }
+
+        audioStreamRef.current = streamDestRef.current.stream;
+        setIsBroadcasting(true);
+
+        activeConnectionsRef.current.forEach((conn, peerId) => {
+          callPeerWithStream(peerId, streamDestRef.current.stream);
+          if (conn.open) {
+            conn.send({ type: 'AUDIO_STARTED', title: file.name });
+          }
+        });
+
+        video.play().catch(e => console.warn('[Host] Video autoplay blocked, tap play to start:', e));
       }
+      return;
+    }
 
+    // Standard Audio File Mode (MP3, WAV, FLAC, M4A)
+    setIsVideoSource(false);
+    isVideoSourceRef.current = false;
+    setIsFileDecoding(true);
+
+    try {
       const arrayBuffer = await file.arrayBuffer();
-      // Decode audio data reliably across all browsers (safely handles callback and promise API)
       const decodedBuffer = await new Promise((resolve, reject) => {
         ctx.decodeAudioData(arrayBuffer, resolve, reject);
       });
@@ -602,7 +716,6 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       bufferPauseOffsetRef.current = 0;
       setIsFileDecoding(false);
 
-      // Immediately play decoded audio through delayed host pipeline & broadcast
       setLaptopMuted(false);
       playBufferAtOffset(0);
     } catch (err) {
@@ -701,7 +814,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     });
   };
 
-  const setupHostAudio = (stream, isMic = false) => {
+  const setupHostAudio = (stream, isMic = false, isScreenCapture = false) => {
     setIsBroadcasting(true);
 
     stream.getAudioTracks().forEach(track => {
@@ -740,10 +853,11 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       source.connect(hostDelayNodeRef.current);
       source.connect(streamDestRef.current);
 
-      laptopMutedRef.current = isMic;
-      setLaptopMuted(isMic);
+      const shouldMute = isMic || isScreenCapture;
+      laptopMutedRef.current = shouldMute;
+      setLaptopMuted(shouldMute);
       if (hostGainNodeRef.current) {
-        hostGainNodeRef.current.gain.setValueAtTime(isMic ? 0 : 1.0, ctx.currentTime);
+        hostGainNodeRef.current.gain.setValueAtTime(shouldMute ? 0 : 1.0, ctx.currentTime);
       }
     } catch (e) {
       console.warn('[Host] Audio pipeline notice:', e);
@@ -910,6 +1024,16 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       audioElementRef.current.pause();
       audioElementRef.current.src = '';
     }
+    if (videoElementRef.current) {
+      try {
+        videoElementRef.current.pause();
+        videoElementRef.current.removeAttribute('src');
+        videoElementRef.current.src = '';
+        videoElementRef.current.load();
+      } catch (e) {}
+    }
+    setIsVideoSource(false);
+    isVideoSourceRef.current = false;
 
     // Only stop tracks on real media streams (mic/screen). NEVER stop WebAudio-synthesized
     // MediaStreamDestination tracks — those are virtual and cannot be restarted once stopped.
@@ -1233,9 +1357,9 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
                   <RefreshCw size={14} className="spin-slow" />
                   <span>DECODING PCM AUDIO INTO MEMORY (ZERO-BUFFER STREAMING)...</span>
                 </div>
-              ) : fileAudioBuffer ? (
+              ) : (fileAudioBuffer || isVideoSource) ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {/* Timeline Bar */}
+                  {/* Timeline Bar with Click-to-Seek */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <span className="font-mono" style={{ fontSize: '11px', color: 'var(--amber-bright)', minWidth: '40px' }}>
                       {(() => {
@@ -1245,14 +1369,19 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
                       })()}
                     </span>
 
-                    <div style={{ 
-                      flex: 1, 
-                      height: '6px', 
-                      background: 'rgba(255,255,255,0.1)', 
-                      borderRadius: '3px', 
-                      overflow: 'hidden',
-                      position: 'relative'
-                    }}>
+                    <div 
+                      onClick={handleSeek}
+                      style={{ 
+                        flex: 1, 
+                        height: '10px', 
+                        background: 'rgba(255,255,255,0.15)', 
+                        borderRadius: '5px', 
+                        overflow: 'hidden',
+                        position: 'relative',
+                        cursor: 'pointer'
+                      }}
+                      title="Click to seek"
+                    >
                       <div style={{ 
                         width: `${fileDuration > 0 ? (fileCurrentTime / fileDuration) * 100 : 0}%`, 
                         height: '100%', 
@@ -1348,6 +1477,35 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
               )}
             </button>
           </div>
+
+          {/* Anti-Echo Protection Guidance Banner for Screen/Tab Audio */}
+          {sourceType === 'screen' && (
+            <div style={{
+              padding: '10px 14px',
+              borderRadius: '8px',
+              background: laptopMuted ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.12)',
+              border: `1px solid ${laptopMuted ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              {laptopMuted ? (
+                <>
+                  <ShieldCheck size={18} color="#10b981" style={{ flexShrink: 0 }} />
+                  <div style={{ fontSize: '11px', color: '#10b981', lineHeight: '1.4' }}>
+                    <strong>✓ Anti-Echo Protection Active:</strong> Your browser tab plays sound directly to your laptop speakers. PartySync broadcasts to all phones without double-audio echoing or phase cancellation.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <AlertCircle size={18} color="var(--amber-bright)" style={{ flexShrink: 0 }} />
+                  <div style={{ fontSize: '11px', color: 'var(--amber-bright)', lineHeight: '1.4' }}>
+                    <strong>⚠️ Delayed Laptop Audio Active ({hostDelayMs}ms):</strong> Mute the source video/tab in your browser so you don't hear both the direct tab sound and the delayed PartySync audio simultaneously.
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Host Hardware Output Profile: Laptop Speakers vs Bluetooth Speaker */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '12px' }}>
@@ -1539,24 +1697,33 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
               FEED: <strong style={{ color: 'var(--text-cream)' }}>{activeMediaTitle}</strong>
             </span>
             <span className="font-mono" style={{ fontSize: '11px', color: isBroadcasting ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
-              {isBroadcasting ? '48.0 kHz • 256KBPS STUDIO STEREO OPUS' : 'WAITING FOR INPUT'}
+              {isBroadcasting ? '48.0 kHz • 320KBPS STUDIO STEREO OPUS' : 'WAITING FOR INPUT'}
             </span>
           </div>
 
           <Visualizer analyser={analyserRef.current} active={isBroadcasting} height={54} powerSave={isPowerSave} />
         </div>
 
-        {/* Frame-Accurate Video Delay Lip-Sync Monitor for System Screen / Tab Video */}
-        {sourceType === 'screen' && displayMediaStreamRef.current && isBroadcasting && (
+        {/* Frame-Accurate Video Delay Lip-Sync Monitor for System Screen / Tab Video or Local Movie */}
+        {((sourceType === 'screen' && displayMediaStreamRef.current) || (sourceType === 'file' && isVideoSource && displayMediaStreamRef.current)) && isBroadcasting ? (
           <LipSyncVideoMonitor 
             stream={displayMediaStreamRef.current} 
             audioDelayMs={hostDelayMs} 
             title={activeMediaTitle} 
           />
-        )}
+        ) : null}
 
-        {/* Video preview for local movies */}
-        <video ref={videoElementRef} controls style={{ width: '100%', maxHeight: '180px', borderRadius: '10px', display: sourceType === 'file' ? 'block' : 'none' }} />
+        {/* Video preview for local movies (fallback if canvas monitor cannot capture stream) */}
+        <video 
+          ref={videoElementRef} 
+          controls 
+          style={{ 
+            width: '100%', 
+            maxHeight: '180px', 
+            borderRadius: '10px', 
+            display: (sourceType === 'file' && isVideoSource && !displayMediaStreamRef.current) ? 'block' : 'none' 
+          }} 
+        />
 
       </div>
 
@@ -1575,7 +1742,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
               Satellite Speaker Fleet ({connectedPeers.length} Active Devices)
             </h2>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
-              All devices are locked to the Host Master Clock and streaming 256kbps Studio Hi-Fi sound.
+              All devices are locked to the Host Master Clock and streaming 320kbps Studio Hi-Fi sound.
             </p>
           </div>
         </div>

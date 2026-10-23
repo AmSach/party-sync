@@ -42,8 +42,9 @@ export default function LipSyncVideoMonitor({
     const ctx = canvas.getContext('2d', { alpha: false });
 
     let lastTime = performance.now();
-    let frameCount = 0;
     let lastFpsUpdate = performance.now();
+    let frameCount = 0;
+    let isCapturingFrame = false;
 
     const processFrame = async () => {
       animationFrameRef.current = requestAnimationFrame(processFrame);
@@ -68,7 +69,6 @@ export default function LipSyncVideoMonitor({
       if (delayNeeded <= 15) {
         // Direct zero-delay passthrough
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        // Clear queue
         while (frameQueueRef.current.length > 0) {
           const f = frameQueueRef.current.shift();
           if (f.bitmap && typeof f.bitmap.close === 'function') f.bitmap.close();
@@ -76,13 +76,22 @@ export default function LipSyncVideoMonitor({
         return;
       }
 
-      // Capture frame into ImageBitmap
-      try {
-        const bitmap = await createImageBitmap(video);
-        frameQueueRef.current.push({ bitmap, time: now });
-      } catch (e) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        return;
+      // Capture frame into ImageBitmap with queue limit and in-flight guard
+      if (!isCapturingFrame && frameQueueRef.current.length < 35) {
+        isCapturingFrame = true;
+        try {
+          const maxDim = 1920;
+          const opts = video.videoWidth > maxDim 
+            ? { resizeWidth: maxDim, resizeQuality: 'medium' } 
+            : undefined;
+          const bitmap = await (opts ? createImageBitmap(video, opts) : createImageBitmap(video));
+          frameQueueRef.current.push({ bitmap, time: performance.now() });
+        } catch (e) {
+          // Fallback if bitmap fails
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        } finally {
+          isCapturingFrame = false;
+        }
       }
 
       const targetTime = now - delayNeeded;

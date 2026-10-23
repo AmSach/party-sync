@@ -13,23 +13,22 @@ export function configureHighFidelityAudioSDP(sdp) {
     const pt = opusMatch[1];
     const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+([^\\r\\n]+)`, 'i');
 
-    // Broadcast High-Fidelity Robust Stereo Parameters:
-    // - stereo=1: Full stereo channel decoding
-    // - sprop-stereo=1: Signal stereo capabilities in SDP
-    // - maxaveragebitrate=192000: Broadcast transparent 192kbps stereo (CD audio quality)
-    // - maxplaybackrate=48000: Full 48kHz frequency spectrum
-    // - useinbandfec=1: Forward Error Correction seamlessly heals dropped Wi-Fi packets without audio drops
-    // - packetloss=15: Proactive 15% packet loss protection eliminates audio dropouts on busy Wi-Fi
-    // - ptime=20 / minptime=20: Standard 20ms packet pacing prevents router queue congestion and packet loss
-    // - cbr=0: Dynamic Variable Bitrate prevents Wi-Fi buffer overruns
-    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=192000;maxplaybackrate=48000;useinbandfec=1;packetloss=15;cbr=0;ptime=20;minptime=20';
+    // Broadcast Studio-Grade 320kbps Ultra-Fidelity Stereo Parameters:
+    // - stereo=1 / sprop-stereo=1: Discrete 2-channel stereo
+    // - maxaveragebitrate=320000: Broadcast pristine 320kbps studio audio (maximum Opus transparency)
+    // - maxplaybackrate=48000 / sprop-maxcapturerate=48000: Full 48kHz studio audio spectrum
+    // - usedtx=0: Strictly disable DTX so Opus never silences quiet movie dialogue or background ambiance
+    // - useinbandfec=1 / packetloss=15: Proactive 15% Forward Error Correction heals dropped Wi-Fi packets
+    // - cbr=1: Constant Bitrate eliminates burst congestion and jitter spikes
+    // - ptime=20 / minptime=10: 20ms packet pacing prevents router queue overflows
+    const studioParams = 'stereo=1;sprop-stereo=1;maxaveragebitrate=320000;maxplaybackrate=48000;sprop-maxcapturerate=48000;usedtx=0;useinbandfec=1;packetloss=15;cbr=1;ptime=20;minptime=10;maxptime=20';
 
     if (fmtpRegex.test(modified)) {
       modified = modified.replace(fmtpRegex, (match, existing) => {
         const filtered = existing
           .split(';')
           .map(s => s.trim())
-          .filter(s => !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|cbr|useinbandfec|packetloss|ptime|minptime)=/i.test(s))
+          .filter(s => !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|sprop-maxcapturerate|usedtx|cbr|useinbandfec|packetloss|ptime|minptime|maxptime)=/i.test(s))
           .join(';');
         return `a=fmtp:${pt} ${filtered ? filtered + ';' : ''}${studioParams}`;
       });

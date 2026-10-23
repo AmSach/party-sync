@@ -58,9 +58,14 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   };
 
   const isConnectedRef = useRef(false);
+  const isAudioActiveRef = useRef(false);
+  const lastStreamRequestTimeRef = useRef(0);
   useEffect(() => {
     isConnectedRef.current = isConnected;
   }, [isConnected]);
+  useEffect(() => {
+    isAudioActiveRef.current = isAudioActive;
+  }, [isAudioActive]);
 
   const [needsUserGesture, setNeedsUserGesture] = useState(false);
 
@@ -247,8 +252,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         syncKeeperIntervalRef.current = setInterval(async () => {
           ticks++;
           if (connRef.current && connRef.current.open) {
-            // Watchdog: If Host is broadcasting but audio call has not arrived, request it
-            if (hostIsBroadcastingRef.current && !isAudioActive) {
+            // Watchdog: If Host is broadcasting but audio call has NOT arrived, request it
+            // STRICTLY throttled to at most once per 6 seconds to prevent any re-call storm
+            const now = Date.now();
+            if (hostIsBroadcastingRef.current && !isAudioActiveRef.current && (now - lastStreamRequestTimeRef.current > 6000)) {
+              lastStreamRequestTimeRef.current = now;
               console.log('[Receiver Watchdog] Host broadcasting but audio stream missing — requesting stream');
               connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
             }
@@ -272,10 +280,12 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           if (data.isAudioActive) {
             setStatusText('Host broadcasting • Connecting audio...');
             setTimeout(() => {
-              if (hostIsBroadcastingRef.current && !isAudioActive && connRef.current?.open) {
+              const now = Date.now();
+              if (hostIsBroadcastingRef.current && !isAudioActiveRef.current && connRef.current?.open && (now - lastStreamRequestTimeRef.current > 5000)) {
+                lastStreamRequestTimeRef.current = now;
                 connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
               }
-            }, 2000);
+            }, 2500);
           } else {
             setStatusText('● Tuned In • Waiting for Host to select audio');
           }
@@ -283,12 +293,15 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           hostIsBroadcastingRef.current = true;
           setStatusText('● Host started audio • Connecting...');
           setTimeout(() => {
-            if (hostIsBroadcastingRef.current && !isAudioActive && connRef.current?.open) {
+            const now = Date.now();
+            if (hostIsBroadcastingRef.current && !isAudioActiveRef.current && connRef.current?.open && (now - lastStreamRequestTimeRef.current > 5000)) {
+              lastStreamRequestTimeRef.current = now;
               connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
             }
-          }, 1500);
+          }, 2000);
         } else if (data.type === 'AUDIO_STOPPED') {
           hostIsBroadcastingRef.current = false;
+          isAudioActiveRef.current = false;
           setIsAudioActive(false);
           setStatusText('● Host paused audio feed');
         } else if (data.type === 'NTP_PONG') {
@@ -382,6 +395,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         // Route audio through Web Audio API DelayNode pipeline
         audioProcessor.setupStream(remoteAudioStream);
 
+        isAudioActiveRef.current = true;
         setIsAudioActive(true);
         setStatusText('● Live Synchronized Studio Playout');
         if (audioProcessor.ctx && audioProcessor.ctx.state === 'suspended') {
@@ -395,8 +409,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         console.log('[Receiver] Audio call closed');
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
+          isAudioActiveRef.current = false;
           setIsAudioActive(false);
-          if (hostIsBroadcastingRef.current && connRef.current?.open && !userDisconnectedRef.current) {
+          const now = Date.now();
+          if (hostIsBroadcastingRef.current && connRef.current?.open && !userDisconnectedRef.current && (now - lastStreamRequestTimeRef.current > 4000)) {
+            lastStreamRequestTimeRef.current = now;
             setStatusText('Audio stream reconnecting...');
             connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
           } else {
@@ -409,8 +426,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         console.warn('[Receiver] Media call error:', err);
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
+          isAudioActiveRef.current = false;
           setIsAudioActive(false);
-          if (hostIsBroadcastingRef.current && connRef.current?.open && !userDisconnectedRef.current) {
+          const now = Date.now();
+          if (hostIsBroadcastingRef.current && connRef.current?.open && !userDisconnectedRef.current && (now - lastStreamRequestTimeRef.current > 4000)) {
+            lastStreamRequestTimeRef.current = now;
             connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
           }
         }
@@ -568,6 +588,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       wakeLockRef.current = null;
     }
     setIsConnected(false);
+    isAudioActiveRef.current = false;
     setIsAudioActive(false);
     setStatusText('Receiver Standby');
   };
