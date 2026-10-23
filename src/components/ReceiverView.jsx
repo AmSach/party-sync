@@ -187,9 +187,10 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   };
 
   const connectToHost = (isAutoReconnecting = false) => {
+    const isAuto = isAutoReconnecting === true;
     const cleanRoom = roomId.trim();
     if (!cleanRoom) {
-      if (!isAutoReconnecting) alert('Please enter a valid Session Code (e.g. 4821)!');
+      if (!isAuto) alert('Please enter a valid Session Code (e.g. 4821)!');
       return;
     }
 
@@ -199,11 +200,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
     targetRoomIdRef.current = targetRoomId;
     userDisconnectedRef.current = false;
-    if (!isAutoReconnecting) {
+    if (!isAuto) {
       reconnectAttemptsRef.current = 0;
     }
 
-    setStatusText(isAutoReconnecting ? `Re-tuning to session (${reconnectAttemptsRef.current})...` : 'Tuning into session...');
+    setStatusText(isAuto ? `Re-tuning to session (${reconnectAttemptsRef.current})...` : 'Tuning into session...');
     audioProcessor.init();
 
     if (peerRef.current) {
@@ -766,7 +767,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
                     boxShadow: isAudioActive ? '0 0 8px #10b981' : '0 0 8px var(--accent-glow)'
                   }} />
                   <strong className="font-mono" style={{ fontSize: '12px', color: isAudioActive ? '#10b981' : 'var(--accent-bright)' }}>
-                    {isAudioActive ? '256KBPS STUDIO HI-FI STREAMING' : 'LINKED TO HOST CLOCK'}
+                    {isAudioActive ? '320KBPS STUDIO HI-FI STREAMING' : 'LINKED TO HOST CLOCK'}
                   </strong>
                 </div>
 

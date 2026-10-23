@@ -144,6 +144,17 @@ export default function LipSyncVideoMonitor({
     }
   };
 
+  useEffect(() => {
+    const handlePipLeave = () => setIsPipActive(false);
+    const video = pipVideoRef.current;
+    if (video) {
+      video.addEventListener('leavepictureinpicture', handlePipLeave);
+    }
+    return () => {
+      if (video) video.removeEventListener('leavepictureinpicture', handlePipLeave);
+    };
+  }, []);
+
   const togglePip = async () => {
     const canvas = canvasRef.current;
     const pipVideo = pipVideoRef.current;
@@ -154,8 +165,21 @@ export default function LipSyncVideoMonitor({
         await document.exitPictureInPicture();
         setIsPipActive(false);
       } else {
+        if (!pipVideo.requestPictureInPicture) {
+          console.warn('[LipSyncMonitor] Picture-in-picture API not supported in this browser');
+          return;
+        }
         if (!pipVideo.srcObject) {
-          pipVideo.srcObject = canvas.captureStream(30);
+          const stream = typeof canvas.captureStream === 'function' 
+            ? canvas.captureStream(30) 
+            : typeof canvas.mozCaptureStream === 'function' 
+              ? canvas.mozCaptureStream(30) 
+              : null;
+          if (!stream) {
+            console.warn('[LipSyncMonitor] Canvas captureStream not available');
+            return;
+          }
+          pipVideo.srcObject = stream;
           await pipVideo.play();
         }
         await pipVideo.requestPictureInPicture();

@@ -20,27 +20,28 @@ export default function UltraPowerSaver({ onWake, mode = 'host', activeMediaTitl
   // Web Battery API (Supported on Chromium / Android)
   useEffect(() => {
     let batteryInstance = null;
+    let listener = null;
 
     if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
       navigator.getBattery().then(battery => {
         batteryInstance = battery;
-        const updateBattery = () => {
+        listener = () => {
           setBatteryInfo({
             level: Math.round(battery.level * 100),
             charging: battery.charging
           });
         };
-        updateBattery();
-        battery.addEventListener('levelchange', updateBattery);
-        battery.addEventListener('chargingchange', updateBattery);
+        listener();
+        battery.addEventListener('levelchange', listener);
+        battery.addEventListener('chargingchange', listener);
       }).catch(() => {});
     }
 
     return () => {
-      if (batteryInstance) {
+      if (batteryInstance && listener) {
         try {
-          batteryInstance.removeEventListener('levelchange', () => {});
-          batteryInstance.removeEventListener('chargingchange', () => {});
+          batteryInstance.removeEventListener('levelchange', listener);
+          batteryInstance.removeEventListener('chargingchange', listener);
         } catch (e) {}
       }
     };

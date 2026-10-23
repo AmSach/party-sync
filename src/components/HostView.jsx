@@ -53,6 +53,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const syncModeRef = useRef('balanced');
   const satelliteLagsRef = useRef(new Map()); // peerId -> { name, physicalLagMs, profile }
   const [fleetTargetMs, setFleetTargetMs] = useState(300);
+  const fleetTargetMsRef = useRef(300);
 
   const [activeMediaTitle, setActiveMediaTitle] = useState('No audio source selected');
   const [showQrModal, setShowQrModal] = useState(false);
@@ -272,9 +273,9 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
     conn.send({ 
       type: 'CALIBRATE_TELEMETRY', 
       hostDelayMs: hostDelayMsRef.current,
-      fleetTargetMs: fleetTargetMs,
+      fleetTargetMs: fleetTargetMsRef.current || 300,
       hostOutputProfile: hostOutputProfileRef.current,
-      laptopMuted: laptopMuted,
+      laptopMuted: laptopMutedRef.current,
       rtt: clockSync.rtt || 0 
     });
     triggerVisualFlash();
@@ -296,7 +297,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
     const existingCall = activeMediaCallsRef.current.get(peerId);
     const isCallConnected = existingCall && (existingCall.open || (existingCall.peerConnection && ['connected', 'completed'].includes(existingCall.peerConnection.iceConnectionState)));
-    if (isCallConnected && existingCall._localStream === stream) {
+    const localStream = existingCall ? (existingCall.localStream || existingCall._localStream) : null;
+    if (isCallConnected && localStream === stream) {
       console.log(`[Host] Media call to ${peerId} already active on this stream, skipping redundant call`);
       return;
     }
@@ -618,6 +620,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
       const video = videoElementRef.current;
       if (video) {
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
         video.src = URL.createObjectURL(file);
         video.loop = isFileLoopingRef.current;
 
@@ -920,6 +924,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
     const targetMs = maxLag;
     setFleetTargetMs(targetMs);
+    fleetTargetMsRef.current = targetMs;
 
     const newHostDelay = Math.max(0, targetMs - hostPhysicalLag);
     console.log(`[Host] Fleet Sync: Mode=${syncModeRef.current} | Target=${targetMs}ms | Host Lag=${hostPhysicalLag}ms (${hostOutputProfileRef.current}) → Host Delay=${newHostDelay}ms across ${satelliteLagsRef.current.size} satellites`);
@@ -1082,7 +1087,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       if (conn.open) conn.send({ type: 'AUDIO_STOPPED' });
     });
 
-    if (fullTeardown) {
+    if (fullTeardown === true) {
       if (wakeLockRef.current) {
         try { wakeLockRef.current.release(); } catch (e) {}
         wakeLockRef.current = null;
@@ -1138,7 +1143,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
                 boxShadow: isBroadcasting ? '0 0 10px var(--amber-core)' : 'none'
               }} />
               <span className="font-mono" style={{ fontSize: '12px', letterSpacing: '1.5px', color: isBroadcasting ? 'var(--amber-bright)' : 'var(--text-dim)' }}>
-                {isBroadcasting ? 'TRANSMITTER LIVE • 256KBPS STUDIO' : 'TRANSMITTER STANDBY'}
+                {isBroadcasting ? 'TRANSMITTER LIVE • 320KBPS STUDIO' : 'TRANSMITTER STANDBY'}
               </span>
             </div>
             <h1 className="font-serif" style={{ fontSize: '26px', fontWeight: '700', marginTop: '4px' }}>
@@ -1717,6 +1722,8 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
         <video 
           ref={videoElementRef} 
           controls 
+          playsInline
+          webkit-playsinline="true"
           style={{ 
             width: '100%', 
             maxHeight: '180px', 
@@ -1769,7 +1776,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
                   <span>P2P DataChannel Active</span>
-                  <span style={{ color: 'var(--accent-bright)' }}>256KBPS OPUS</span>
+                  <span style={{ color: 'var(--accent-bright)' }}>320KBPS OPUS</span>
                 </div>
 
                 <button
@@ -2029,7 +2036,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
                 <div style={{ fontSize: '12px', color: 'var(--text-cream)', lineHeight: '1.4' }}>
                   <strong>Click "Share":</strong>
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    PartySync automatically strips the video feed and broadcasts pure 192kbps stereo Opus to all phones in sync!
+                    PartySync automatically strips the video feed and broadcasts pure 320kbps stereo Opus to all phones in sync!
                   </div>
                 </div>
               </div>

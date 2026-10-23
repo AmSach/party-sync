@@ -5,7 +5,14 @@ export default function Visualizer({ analyser, active = true, height = 70, power
 
   useEffect(() => {
     // Ultra Power Saving Mode: completely halt canvas render loop & FFT calculation
-    if (powerSave) return;
+    if (powerSave) {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      return;
+    }
 
     const canvas = canvasRef.current;
     if (!canvas) return;

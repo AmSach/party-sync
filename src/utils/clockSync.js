@@ -20,6 +20,7 @@ class ClockSynchronizer {
     if (!conn || !conn.open) return Promise.resolve(null);
     this.samples = [];
     this.isSynced = false;
+    this._isCalibrating = true;
 
     return new Promise((resolve) => {
       this._resolveCalibration = resolve;
@@ -86,6 +87,9 @@ class ClockSynchronizer {
   }
 
   finalizeCalibration() {
+    if (!this._isCalibrating) return;
+    this._isCalibrating = false;
+
     if (this.samples.length === 0) {
       if (this._resolveCalibration) {
         this._resolveCalibration({ rtt: 10, offset: this.clockOffset });

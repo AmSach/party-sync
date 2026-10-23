@@ -190,8 +190,8 @@ class SyncedAudioProcessor {
     if (this.gainNode && this.ctx) {
       try {
         const now = this.ctx.currentTime;
-        this.gainNode.gain.cancelScheduledValues(0);
-        this.gainNode.gain.setValueAtTime(this.currentVolume, now);
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setTargetAtTime(this.currentVolume, now, 0.02);
       } catch (e) {
         try {
           this.gainNode.gain.value = this.currentVolume;

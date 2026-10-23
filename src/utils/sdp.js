@@ -55,7 +55,7 @@ if (typeof window !== 'undefined' && window.RTCPeerConnection) {
 
         return origSetLocalDescription.call(this, newDesc).catch((err) => {
           console.warn('[WebRTC] Modified SDP rejected, falling back to native SDP:', err);
-          return origSetLocalDescription.apply(this, arguments);
+          return origSetLocalDescription.call(this, desc);
         });
       } catch (e) {
         console.warn('[WebRTC] SDP modification failed, using original description:', e);
@@ -63,5 +63,5 @@ if (typeof window !== 'undefined' && window.RTCPeerConnection) {
     }
     return origSetLocalDescription.apply(this, arguments);
   };
-  console.log('[WebRTC] Hi-Fi Stereo Audio SDP interceptor active (256kbps 48kHz Opus with In-Band FEC)');
+  console.log('[WebRTC] Hi-Fi Stereo Audio SDP interceptor active (320kbps 48kHz Opus with In-Band FEC)');
 }
