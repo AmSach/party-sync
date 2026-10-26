@@ -57,6 +57,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const fleetTargetMsRef = useRef(300);
 
   const [activeMediaTitle, setActiveMediaTitle] = useState('No audio source selected');
+  const activeMediaTitleRef = useRef('No audio source selected');
   const [showQrModal, setShowQrModal] = useState(false);
   const [showAudioMissingHelp, setShowAudioMissingHelp] = useState(false);
 
@@ -78,6 +79,7 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const activeConnectionsRef = useRef(new Map());
   const activeMediaCallsRef = useRef(new Map()); // peerId -> MediaConnection
   const activeBlobUrlRef = useRef(null);
+  const wakeLockRef = useRef(null);
 
   const getAudioContext = () => {
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
