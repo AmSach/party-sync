@@ -35,6 +35,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   const myPhysicalLagRef = useRef(90);
   const fleetTargetLagRef = useRef(300);
   const syncKeeperIntervalRef = useRef(null);
+  const pllActiveRef = useRef(false); // tracks whether PLL servo is running
 
   // Dynamic NetEQ jitter buffer measurement & Auto-recovery state
   const measuredNetEqRef = useRef(35);
@@ -80,6 +81,8 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       clearInterval(syncKeeperIntervalRef.current);
       syncKeeperIntervalRef.current = null;
     }
+    clockSync.stopPLL();
+    pllActiveRef.current = false;
     if (activeCallRef.current) {
       try { activeCallRef.current.close(); } catch (e) {}
       activeCallRef.current = null;
@@ -209,6 +212,8 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = setTimeout(() => {
       if (userDisconnectedRef.current) return;
+      clockSync.stopPLL();
+      pllActiveRef.current = false;
       if (activeCallRef.current) {
         try { activeCallRef.current.close(); } catch (e) {}
         activeCallRef.current = null;
@@ -283,19 +288,21 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         setStatusText('Tuned In • Calibrating Precision Clock');
         requestWakeLock();
 
-        // High-precision clock calibration burst on handshake
+        // High-precision clock calibration burst on handshake (8-ping burst for fast initial lock)
         clockSync.startCalibration(conn).then(() => {
           sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
         });
 
-        // Background Sync Keeper & Stream Watchdog
+        // Background Sync Keeper — Stream Watchdog only.
+        // NTP recalibration is now handled by the PLL servo (startPLL) which runs
+        // continuously once the audio stream arrives, so we do NOT do burst recals here.
         if (syncKeeperIntervalRef.current) clearInterval(syncKeeperIntervalRef.current);
         let ticks = 0;
-        syncKeeperIntervalRef.current = setInterval(async () => {
+        syncKeeperIntervalRef.current = setInterval(() => {
           ticks++;
           if (connRef.current && connRef.current.open) {
-            // Watchdog: If Host is broadcasting but audio call has NOT arrived, request it
-            // STRICTLY throttled to at most once per 6 seconds to prevent any re-call storm
+            // Watchdog: If Host is broadcasting but audio call has NOT arrived, request it.
+            // Strictly throttled to once per 6 seconds to prevent re-call storms.
             const now = Date.now();
             if (hostIsBroadcastingRef.current && !isAudioActiveRef.current && (now - lastStreamRequestTimeRef.current > 6000)) {
               lastStreamRequestTimeRef.current = now;
@@ -303,13 +310,14 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
               connRef.current.send({ type: 'REQUEST_AUDIO_STREAM' });
             }
 
-            // Real NetEQ measurement
+            // Real NetEQ measurement every tick
             updateJitterBufferStats();
 
-            // Periodic NTP clock calibration (every 14s)
-            if (ticks % 4 === 0) {
-              await clockSync.startCalibration(connRef.current);
-              sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+            // If PLL is not running yet (audio not arrived) do a lightweight resync ping every 21s
+            if (!pllActiveRef.current && ticks % 6 === 0) {
+              clockSync.startCalibration(connRef.current).then(() => {
+                sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+              });
             }
           }
         }, 3500);
@@ -375,6 +383,8 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
       conn.on('close', () => {
         console.warn('[Receiver] Data connection closed');
+        clockSync.stopPLL();
+        pllActiveRef.current = false;
         setIsConnected(false);
         setIsAudioActive(false);
         if (!userDisconnectedRef.current) {
@@ -446,12 +456,39 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         }
 
         setTimeout(updateJitterBufferStats, 1000);
+
+        // ── START PLL SERVO ──────────────────────────────────────────────────
+        // After audio is flowing, begin the continuous Phase-Lock Loop.
+        // The PLL fires one NTP ping every 2s and applies smooth micro-corrections
+        // to the DelayNode — eliminating clock drift between phones.
+        if (connRef.current && connRef.current.open) {
+          pllActiveRef.current = true;
+          clockSync.startPLL(
+            connRef.current,
+            audioProcessor.ctx,
+            (correctionMs, _rtt) => {
+              // correctionMs: how much the offset changed this tick (can be negative)
+              // We apply this as a micro-nudge rather than re-computing the whole delay,
+              // which keeps the adjustment completely inaudible.
+              if (Math.abs(correctionMs) > 0.5 && Math.abs(correctionMs) < 50) {
+                audioProcessor.nudgeDelay(correctionMs);
+              } else if (Math.abs(correctionMs) >= 50) {
+                // Large correction means something dramatic happened (reconnect, etc.)
+                // Re-do a full fleet sync calc instead of a nudge.
+                sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+              }
+            }
+          );
+        }
       });
 
       call.on('close', () => {
         console.log('[Receiver] Audio call closed');
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
+          // Stop PLL servo — the audio stream is gone
+          clockSync.stopPLL();
+          pllActiveRef.current = false;
           if (webrtcStreamRef.current) {
             try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
             webrtcStreamRef.current = null;
@@ -473,6 +510,8 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         console.warn('[Receiver] Media call error:', err);
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
+          clockSync.stopPLL();
+          pllActiveRef.current = false;
           if (webrtcStreamRef.current) {
             try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
             webrtcStreamRef.current = null;
@@ -785,7 +824,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
               {/* Nanosecond Master Clock Telemetry */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
                 <span>
-                  ⚡ Master Clock: {clockInfo.isSynced ? <span style={{ color: '#10b981' }}>Locked (RTT: {clockInfo.rtt}ms, Drift: {clockInfo.offset.toFixed(1)}ms)</span> : 'Calibrating...'}
+                  ⚡ Master Clock: {clockInfo.isSynced ? (
+                    <span style={{ color: '#10b981' }}>
+                      Locked (RTT: {clockInfo.rtt}ms, Offset: {clockInfo.offset.toFixed(1)}ms{clockInfo.drift !== undefined ? `, Skew: ${clockInfo.drift >= 0 ? '+' : ''}${clockInfo.drift.toFixed(1)}ms` : ''})
+                    </span>
+                  ) : 'Calibrating...'}
                 </span>
                 <button onClick={recalibrateClock} className="btn-analog" style={{ padding: '2px 6px', fontSize: '10px' }}>
                   <RefreshCw size={10} /> Re-Sync

@@ -193,6 +193,33 @@ class SyncedAudioProcessor {
     }
   }
 
+  /**
+   * PLL servo micro-correction: smoothly shifts the delay by `deltMs` without
+   * setting an absolute target. Uses a very gentle 150ms time constant so the
+   * correction is completely inaudible (no clicks, no pitch warble).
+   * Called by the PLL callback every 2 seconds.
+   */
+  nudgeDelay(deltMs) {
+    if (!this.delayNode || !this.ctx) return;
+
+    this.delayMs = Math.max(0, Math.min(2000, this.delayMs + deltMs));
+    const effectiveSec = Math.max(0, (this.baseBufferMs + this.delayMs) / 1000);
+
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+
+    try {
+      const now = this.ctx.currentTime;
+      this.delayNode.delayTime.cancelScheduledValues(now);
+      // 150ms time constant → gentle inaudible ramp, corrects drift over ~0.5s
+      this.delayNode.delayTime.setTargetAtTime(effectiveSec, now, 0.15);
+      console.log(`[AudioProcessor] PLL nudge Δ${deltMs.toFixed(2)}ms → new delay=${(this.delayMs).toFixed(1)}ms`);
+    } catch (_err) {
+      try { this.delayNode.delayTime.value = effectiveSec; } catch (_e) {}
+    }
+  }
+
   setVolume(vol) {
     this.currentVolume = Math.max(0, Math.min(2, vol));
     if (this.gainNode && this.ctx) {
