@@ -8,12 +8,14 @@ import {
 } from 'lucide-react';
 import { clockSync, ClockSynchronizer } from '../utils/clockSync';
 import { configureHighFidelityAudioSDP } from '../utils/sdp';
+import { PEER_CONFIG, generateRoomId } from '../utils/networkConfig';
 import Visualizer from './Visualizer';
 import LipSyncVideoMonitor from './LipSyncVideoMonitor';
 
 export default function HostView({ onBack, isPowerSave = false, onTogglePowerSave }) {
   const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-  const [roomId] = useState(() => 'SESSION-' + Math.floor(1000 + Math.random() * 9000));
+  const [roomId, setRoomId] = useState(() => generateRoomId());
+  const [meshStatus, setMeshStatus] = useState('connecting'); // 'connecting' | 'online' | 'error'
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [sourceType, setSourceType] = useState(isMobile ? 'file' : 'screen');
   const [isBroadcasting, setIsBroadcasting] = useState(false);
@@ -119,8 +121,11 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
       color: { dark: '#f4efe6', light: '#141210' }
     }).then(url => setQrDataUrl(url));
 
-    // Initialize Host Peer immediately on signaling network
+    // Initialize Host Peer immediately on signaling network with STUN+TURN
     initHostPeer(roomId);
+  }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     requestWakeLock();
 
     // Mobile gesture unlock listener: touching screen resumes AudioContext if suspended
@@ -143,11 +148,24 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
         if (wakeLockRef.current === null) {
           requestWakeLock();
         }
+        if (peerRef.current && !peerRef.current.destroyed && peerRef.current.disconnected) {
+          console.log('[Host] Screen unlocked / resumed — reconnecting signaling socket');
+          try { peerRef.current.reconnect(); } catch (e) {}
+        }
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
+    // Heartbeat: keep PeerJS WebSocket alive on mobile & reconnect if dropped
+    const keepalive = setInterval(() => {
+      if (peerRef.current && !peerRef.current.destroyed && peerRef.current.disconnected) {
+        console.warn('[Host Heartbeat] PeerJS broker disconnected — re-linking...');
+        try { peerRef.current.reconnect(); } catch (e) {}
+      }
+    }, 3500);
+
     return () => {
+      clearInterval(keepalive);
       window.removeEventListener('click', unlockHostAudio);
       window.removeEventListener('touchstart', unlockHostAudio);
       window.removeEventListener('pointerdown', unlockHostAudio);
@@ -167,25 +185,40 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
   const initHostPeer = (hostRoomId) => {
     if (peerRef.current) {
-      peerRef.current.destroy();
+      try { peerRef.current.destroy(); } catch (e) {}
+      peerRef.current = null;
     }
 
-    const peer = new Peer(hostRoomId, {
-      debug: 1,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
-    });
+    setMeshStatus('connecting');
+    const peer = new Peer(hostRoomId, PEER_CONFIG);
 
     peer.on('open', (id) => {
       console.log('[Host] Master broadcast console listening on:', id);
+      setMeshStatus('online');
+    });
+
+    peer.on('disconnected', () => {
+      console.warn('[Host] Peer disconnected from signaling server broker. Auto-reconnecting...');
+      setMeshStatus('connecting');
+      if (!peer.destroyed) {
+        try { peer.reconnect(); } catch (e) {}
+      }
+    });
+
+    peer.on('error', (err) => {
+      console.error('[Host] Signaling/Peer error:', err);
+      if (err.type === 'unavailable-id') {
+        const newCode = generateRoomId();
+        console.warn(`[Host] Room code ${hostRoomId} already in use on broker, auto-switching to ${newCode}`);
+        setRoomId(newCode);
+      } else if (err.type === 'disconnected' || err.type === 'network') {
+        setMeshStatus('connecting');
+        if (!peer.destroyed && peer.disconnected) {
+          try { peer.reconnect(); } catch (e) {}
+        }
+      } else {
+        setMeshStatus('error');
+      }
     });
 
     peer.on('connection', (conn) => {
@@ -266,10 +299,6 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
         console.warn('[Host] Peer connection error:', err);
         handlePeerDisconnect(conn.peer);
       });
-    });
-
-    peer.on('error', (err) => {
-      console.error('[Host] Signaling/Peer error:', err);
     });
 
     peerRef.current = peer;
@@ -1258,13 +1287,17 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
               width: '8px',
               height: '8px',
               borderRadius: '50%',
-              background: connectedPeers.length > 0 ? '#10b981' : 'var(--accent-bright)',
+              background: connectedPeers.length > 0 ? '#10b981' : (meshStatus === 'online' ? 'var(--accent-bright)' : '#f87171'),
               boxShadow: connectedPeers.length > 0 ? '0 0 10px #10b981' : '0 0 8px var(--accent-glow)'
             }} />
-            <span className="font-mono" style={{ fontSize: '12px', fontWeight: '700', color: connectedPeers.length > 0 ? '#10b981' : 'var(--text-cream)' }}>
-              {connectedPeers.length === 0 
-                ? 'WAITING FOR SATELLITE PHONES TO TUNE IN...' 
-                : `WI-FI DIRECT MESH ACTIVE • ${connectedPeers.length} PHONE(S) LINKED`}
+            <span className="font-mono" style={{ fontSize: '12px', fontWeight: '700', color: connectedPeers.length > 0 ? '#10b981' : (meshStatus === 'online' ? 'var(--text-cream)' : '#f87171') }}>
+              {connectedPeers.length > 0
+                ? `WI-FI DIRECT MESH ACTIVE • ${connectedPeers.length} PHONE(S) LINKED`
+                : meshStatus === 'online'
+                  ? '● HOST ONLINE • WAITING FOR SATELLITES TO TUNE IN...'
+                  : meshStatus === 'connecting'
+                    ? 'CONNECTING TO PEER MESH BROKER...'
+                    : '⚠️ PEER MESH RETRYING...'}
             </span>
           </div>
 

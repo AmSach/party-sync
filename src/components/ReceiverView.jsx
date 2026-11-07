@@ -7,12 +7,14 @@ import {
 import { audioProcessor } from '../utils/audio';
 import { clockSync } from '../utils/clockSync';
 import { configureHighFidelityAudioSDP } from '../utils/sdp';
+import { PEER_CONFIG, DATA_CONNECTION_OPTIONS, normalizeRoomId } from '../utils/networkConfig';
 import Visualizer from './Visualizer';
 
 export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave = false, onTogglePowerSave }) {
   const [roomId, setRoomId] = useState(initialRoomId);
   const [deviceName, setDeviceName] = useState('Satellite Speaker');
   const [isConnected, setIsConnected] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [isAudioActive, setIsAudioActive] = useState(false);
   const [delayMs, setDelayMs] = useState(0);
   const [fineTuneMs, setFineTuneMs] = useState(0);
@@ -27,6 +29,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
   const peerRef = useRef(null);
   const connRef = useRef(null);
+  const handshakeTimeoutRef = useRef(null);
   const wakeLockRef = useRef(null);
   const webrtcStreamRef = useRef(null);
   const activeCallRef = useRef(null);
@@ -71,6 +74,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
   const disconnect = () => {
     userDisconnectedRef.current = true;
+    if (handshakeTimeoutRef.current) {
+      clearTimeout(handshakeTimeoutRef.current);
+      handshakeTimeoutRef.current = null;
+    }
+    setIsConnecting(false);
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -141,6 +149,10 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         if (wakeLockRef.current === null && isConnectedRef.current) {
           requestWakeLock();
         }
+        if (peerRef.current && !peerRef.current.destroyed && peerRef.current.disconnected) {
+          console.log('[Receiver] Screen unlocked / resumed — reconnecting signaling socket');
+          try { peerRef.current.reconnect(); } catch (e) {}
+        }
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -199,19 +211,25 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
     } catch (e) {}
   };
 
-  const attemptReconnect = () => {
+  const attemptReconnect = (customDelayMs = null) => {
     if (userDisconnectedRef.current) return;
     if (isReconnectingRef.current) return;
     isReconnectingRef.current = true;
 
     reconnectAttemptsRef.current += 1;
-    const backoffMs = Math.min(8000, 1500 * Math.pow(1.4, reconnectAttemptsRef.current - 1));
+    const backoffMs = customDelayMs !== null
+      ? customDelayMs
+      : Math.min(8000, 1500 * Math.pow(1.4, reconnectAttemptsRef.current - 1));
     console.log(`[Receiver] Auto-reconnect attempt #${reconnectAttemptsRef.current} scheduled in ${Math.round(backoffMs)}ms`);
     setStatusText(`Reconnecting (Attempt #${reconnectAttemptsRef.current} in ${(backoffMs / 1000).toFixed(1)}s)...`);
 
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = setTimeout(() => {
       if (userDisconnectedRef.current) return;
+      if (handshakeTimeoutRef.current) {
+        clearTimeout(handshakeTimeoutRef.current);
+        handshakeTimeoutRef.current = null;
+      }
       clockSync.stopPLL();
       pllActiveRef.current = false;
       if (activeCallRef.current) {
@@ -233,15 +251,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
   const connectToHost = (isAutoReconnecting = false) => {
     const isAuto = isAutoReconnecting === true;
-    const cleanRoom = roomId.trim();
-    if (!cleanRoom) {
+    const targetRoomId = normalizeRoomId(roomId);
+    if (!targetRoomId) {
       if (!isAuto) alert('Please enter a valid Session Code (e.g. 4821)!');
       return;
     }
-
-    const targetRoomId = cleanRoom.toUpperCase().startsWith('SESSION-')
-      ? cleanRoom.toUpperCase()
-      : `SESSION-${cleanRoom.replace(/[^0-9A-Za-z]/g, '')}`;
 
     targetRoomIdRef.current = targetRoomId;
     userDisconnectedRef.current = false;
@@ -249,8 +263,15 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       reconnectAttemptsRef.current = 0;
     }
 
-    setStatusText(isAuto ? `Re-tuning to session (${reconnectAttemptsRef.current})...` : 'Tuning into session...');
+    setIsConnecting(true);
+    const displayCode = targetRoomId.replace('SESSION-', '#');
+    setStatusText(isAuto ? `Re-tuning to Host ${displayCode} (${reconnectAttemptsRef.current})...` : 'Connecting to signaling broker...');
     audioProcessor.init();
+
+    if (handshakeTimeoutRef.current) {
+      clearTimeout(handshakeTimeoutRef.current);
+      handshakeTimeoutRef.current = null;
+    }
 
     if (peerRef.current) {
       try { peerRef.current.destroy(); } catch (e) {}
@@ -258,30 +279,55 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
     }
 
     const receiverPeerId = 'CLIENT-' + Math.random().toString(36).substring(2, 9);
-    const peer = new Peer(receiverPeerId, {
-      debug: 1,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
-    });
+    const peer = new Peer(receiverPeerId, PEER_CONFIG);
 
     peer.on('open', (id) => {
-      console.log('[Receiver] Connected to peer mesh:', id);
-      setStatusText('Synchronizing Master Clock with Host...');
+      console.log('[Receiver] Connected to peer mesh broker:', id);
+      setStatusText(`Connecting to Host ${displayCode}...`);
 
       const conn = peer.connect(targetRoomId, {
-        metadata: { name: deviceName }
+        metadata: { name: deviceName },
+        ...DATA_CONNECTION_OPTIONS
       });
       connRef.current = conn;
 
+      // 6-Second Handshake Timeout Watchdog:
+      // Prevents getting stuck on "Connecting to Host..." if ICE negotiation stalls or Host doesn't respond
+      if (handshakeTimeoutRef.current) clearTimeout(handshakeTimeoutRef.current);
+      handshakeTimeoutRef.current = setTimeout(() => {
+        if (!isConnectedRef.current && !userDisconnectedRef.current) {
+          console.warn(`[Receiver] Handshake with Host ${targetRoomId} timed out after 6s`);
+          setStatusText(`⚠️ Host ${displayCode} did not respond. Retrying route...`);
+          try { conn.close(); } catch (e) {}
+          attemptReconnect(2000);
+        }
+      }, 6000);
+
+      // Monitor WebRTC ICE candidate connection state
+      if (conn.peerConnection) {
+        conn.peerConnection.addEventListener('iceconnectionstatechange', () => {
+          const state = conn.peerConnection?.iceConnectionState;
+          console.log('[Receiver] DataConnection ICE State:', state);
+          if (state === 'checking') {
+            setStatusText(`Negotiating direct audio route to Host ${displayCode}...`);
+          } else if (state === 'failed') {
+            console.warn('[Receiver] ICE path failed — auto-recovering with TURN relay...');
+            if (handshakeTimeoutRef.current) {
+              clearTimeout(handshakeTimeoutRef.current);
+              handshakeTimeoutRef.current = null;
+            }
+            try { conn.close(); } catch (e) {}
+            attemptReconnect(1500);
+          }
+        });
+      }
+
       conn.on('open', () => {
+        if (handshakeTimeoutRef.current) {
+          clearTimeout(handshakeTimeoutRef.current);
+          handshakeTimeoutRef.current = null;
+        }
+        setIsConnecting(false);
         setIsConnected(true);
         isReconnectingRef.current = false;
         reconnectAttemptsRef.current = 0;
@@ -383,6 +429,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
       conn.on('close', () => {
         console.warn('[Receiver] Data connection closed');
+        if (handshakeTimeoutRef.current) {
+          clearTimeout(handshakeTimeoutRef.current);
+          handshakeTimeoutRef.current = null;
+        }
+        setIsConnecting(false);
         clockSync.stopPLL();
         pllActiveRef.current = false;
         setIsConnected(false);
@@ -397,6 +448,11 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
       conn.on('error', (err) => {
         console.warn('[Receiver] Data channel error:', err);
+        if (handshakeTimeoutRef.current) {
+          clearTimeout(handshakeTimeoutRef.current);
+          handshakeTimeoutRef.current = null;
+        }
+        setIsConnecting(false);
         if (!userDisconnectedRef.current) {
           attemptReconnect();
         }
@@ -527,17 +583,35 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       });
     });
 
+    peer.on('disconnected', () => {
+      console.warn('[Receiver] Disconnected from signaling broker. Auto-reconnecting...');
+      if (!peer.destroyed) {
+        try { peer.reconnect(); } catch (e) {}
+      }
+    });
+
     peer.on('error', (err) => {
       console.error('[Receiver] Peer error:', err);
+      if (handshakeTimeoutRef.current) {
+        clearTimeout(handshakeTimeoutRef.current);
+        handshakeTimeoutRef.current = null;
+      }
+      setIsConnecting(false);
+      const displayCode = targetRoomId.replace('SESSION-', '#');
       if (err.type === 'peer-unavailable') {
-        setStatusText(`⚠️ Host ${targetRoomId.replace('SESSION-', '#')} not found. Verify code or make sure Host is open!`);
-        if (!userDisconnectedRef.current && reconnectAttemptsRef.current < 6) {
-          attemptReconnect();
+        setStatusText(`⚠️ Host ${displayCode} not found. Ensure Host is open & on this code!`);
+        if (!userDisconnectedRef.current && reconnectAttemptsRef.current < 4) {
+          attemptReconnect(3500);
+        }
+      } else if (err.type === 'disconnected' || err.type === 'network') {
+        setStatusText('Network connection dropped. Re-linking mesh...');
+        if (!userDisconnectedRef.current) {
+          attemptReconnect(2000);
         }
       } else {
         setStatusText('Station connection failed. Auto-recovering...');
         if (!userDisconnectedRef.current) {
-          attemptReconnect();
+          attemptReconnect(2500);
         }
       }
       setIsConnected(false);
@@ -757,12 +831,56 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
               </div>
             </div>
 
-            <button onClick={connectToHost} className="btn-analog btn-amber" style={{ padding: '16px', fontSize: '15px' }}>
-              <Power size={18} />
-              🔊 Activate Speaker & Join Party
+            <button 
+              onClick={() => connectToHost(false)} 
+              disabled={isConnecting}
+              className="btn-analog btn-amber" 
+              style={{ 
+                padding: '16px', 
+                fontSize: '15px',
+                opacity: isConnecting ? 0.85 : 1,
+                cursor: isConnecting ? 'wait' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}
+            >
+              {isConnecting ? (
+                <>
+                  <RefreshCw size={18} className="animate-spin" />
+                  <span>Connecting to Party Mesh...</span>
+                </>
+              ) : (
+                <>
+                  <Power size={18} />
+                  <span>🔊 Activate Speaker & Join Party</span>
+                </>
+              )}
             </button>
 
-            <div style={{ textAlign: 'center', fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'monospace' }}>
+            {isConnecting && (
+              <button
+                onClick={disconnect}
+                className="btn-analog"
+                style={{ fontSize: '11px', padding: '6px 12px', alignSelf: 'center', color: '#f87171' }}
+              >
+                Cancel Connection
+              </button>
+            )}
+
+            <div 
+              style={{ 
+                textAlign: 'center', 
+                fontSize: '12px', 
+                color: statusText.includes('⚠️') ? '#f87171' : 'var(--text-dim)', 
+                fontFamily: 'monospace',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                background: statusText.includes('⚠️') ? 'rgba(239, 68, 68, 0.1)' : 'transparent',
+                border: statusText.includes('⚠️') ? '1px solid rgba(239, 68, 68, 0.25)' : 'none'
+              }}
+            >
               {statusText}
             </div>
           </div>
