@@ -38,7 +38,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
   const myPhysicalLagRef = useRef(90);
   const fleetTargetLagRef = useRef(300);
   const syncKeeperIntervalRef = useRef(null);
-  const pllActiveRef = useRef(false); // tracks whether PLL servo is running
 
   // Dynamic NetEQ jitter buffer measurement & Auto-recovery state
   const measuredNetEqRef = useRef(35);
@@ -89,8 +88,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
       clearInterval(syncKeeperIntervalRef.current);
       syncKeeperIntervalRef.current = null;
     }
-    clockSync.stopPLL();
-    pllActiveRef.current = false;
     if (activeCallRef.current) {
       try { activeCallRef.current.close(); } catch (e) {}
       activeCallRef.current = null;
@@ -230,8 +227,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         clearTimeout(handshakeTimeoutRef.current);
         handshakeTimeoutRef.current = null;
       }
-      clockSync.stopPLL();
-      pllActiveRef.current = false;
       if (activeCallRef.current) {
         try { activeCallRef.current.close(); } catch (e) {}
         activeCallRef.current = null;
@@ -339,9 +334,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
         });
 
-        // Background Sync Keeper — Stream Watchdog only.
-        // NTP recalibration is now handled by the PLL servo (startPLL) which runs
-        // continuously once the audio stream arrives, so we do NOT do burst recals here.
+        // Background Sync Keeper: Stream Watchdog, NetEQ stats & Periodic Fleet Sync Calibration
         if (syncKeeperIntervalRef.current) clearInterval(syncKeeperIntervalRef.current);
         let ticks = 0;
         syncKeeperIntervalRef.current = setInterval(() => {
@@ -359,8 +352,9 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
             // Real NetEQ measurement every tick
             updateJitterBufferStats();
 
-            // If PLL is not running yet (audio not arrived) do a lightweight resync ping every 21s
-            if (!pllActiveRef.current && ticks % 6 === 0) {
+            // Continuous High-Precision Fleet Sync Calibration (every 7s)
+            // Re-measures transit RTT & NetEQ buffer, updating lag with Host so fleet stays phase-locked
+            if (ticks % 2 === 0) {
               clockSync.startCalibration(connRef.current).then(() => {
                 sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
               });
@@ -434,8 +428,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
           handshakeTimeoutRef.current = null;
         }
         setIsConnecting(false);
-        clockSync.stopPLL();
-        pllActiveRef.current = false;
         setIsConnected(false);
         setIsAudioActive(false);
         if (!userDisconnectedRef.current) {
@@ -513,38 +505,16 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
 
         setTimeout(updateJitterBufferStats, 1000);
 
-        // ── START PLL SERVO ──────────────────────────────────────────────────
-        // After audio is flowing, begin the continuous Phase-Lock Loop.
-        // The PLL fires one NTP ping every 2s and applies smooth micro-corrections
-        // to the DelayNode — eliminating clock drift between phones.
-        if (connRef.current && connRef.current.open) {
-          pllActiveRef.current = true;
-          clockSync.startPLL(
-            connRef.current,
-            audioProcessor.ctx,
-            (correctionMs, _rtt) => {
-              // correctionMs: how much the offset changed this tick (can be negative)
-              // We apply this as a micro-nudge rather than re-computing the whole delay,
-              // which keeps the adjustment completely inaudible.
-              if (Math.abs(correctionMs) > 0.5 && Math.abs(correctionMs) < 50) {
-                audioProcessor.nudgeDelay(correctionMs);
-              } else if (Math.abs(correctionMs) >= 50) {
-                // Large correction means something dramatic happened (reconnect, etc.)
-                // Re-do a full fleet sync calc instead of a nudge.
-                sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
-              }
-            }
-          );
-        }
+        // Immediately perform fleet alignment upon stream arrival
+        setTimeout(() => {
+          sendLagUpdateToHost(hardwareProfileRef.current, fineTuneMsRef.current);
+        }, 100);
       });
 
       call.on('close', () => {
         console.log('[Receiver] Audio call closed');
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
-          // Stop PLL servo — the audio stream is gone
-          clockSync.stopPLL();
-          pllActiveRef.current = false;
           if (webrtcStreamRef.current) {
             try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
             webrtcStreamRef.current = null;
@@ -566,8 +536,6 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
         console.warn('[Receiver] Media call error:', err);
         if (activeCallRef.current === call) {
           activeCallRef.current = null;
-          clockSync.stopPLL();
-          pllActiveRef.current = false;
           if (webrtcStreamRef.current) {
             try { webrtcStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
             webrtcStreamRef.current = null;
@@ -944,7 +912,7 @@ export default function ReceiverView({ initialRoomId = '', onBack, isPowerSave =
                 <span>
                   ⚡ Master Clock: {clockInfo.isSynced ? (
                     <span style={{ color: '#10b981' }}>
-                      Locked (RTT: {clockInfo.rtt}ms, Offset: {clockInfo.offset.toFixed(1)}ms{clockInfo.drift !== undefined ? `, Skew: ${clockInfo.drift >= 0 ? '+' : ''}${clockInfo.drift.toFixed(1)}ms` : ''})
+                      Locked (RTT: {clockInfo.rtt}ms, Offset: {clockInfo.offset.toFixed(1)}ms)
                     </span>
                   ) : 'Calibrating...'}
                 </span>

@@ -424,11 +424,9 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
 
     ensureHostAudioNodes(ctx);
 
-    // Explicitly unmute host speaker for local file playback
-    laptopMutedRef.current = false;
-    setLaptopMuted(false);
+    // Respect user's laptop speaker mute preference
     if (hostGainNodeRef.current) {
-      hostGainNodeRef.current.gain.setValueAtTime(1.0, ctx.currentTime);
+      hostGainNodeRef.current.gain.setValueAtTime(laptopMutedRef.current ? 0 : 1.0, ctx.currentTime);
     }
 
     if (bufferSourceNodeRef.current) {
@@ -981,8 +979,12 @@ export default function HostView({ onBack, isPowerSave = false, onTogglePowerSav
   const hostDelayBroadcastTimer = useRef(null);
 
   const recalculateFleetSync = () => {
+    const ctx = getAudioContext();
+    const baseLat = (ctx?.baseLatency || 0.015) * 1000;
+    const outLat = (ctx?.outputLatency || (isMobile ? 0.025 : 0.045)) * 1000;
+    const hostDac = Math.round(baseLat + outLat);
     const hostBtLag = hostOutputProfileRef.current === 'bluetooth' ? 200 : 0;
-    const hostPhysicalLag = 20 + hostBtLag; // 20ms DAC + BT lag
+    const hostPhysicalLag = Math.max(20, hostDac + hostBtLag);
     
     // Baseline buffer depending on mode:
     // - 'lipsync': 65ms baseline (ultra-low latency for YouTube, Movies, gaming)
